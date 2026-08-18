@@ -1,0 +1,9 @@
+* text=auto
+
+*.cs text diff=csharp
+*.csproj text
+*.sln text eol=crlf
+*.md text
+*.py text
+*.swift text
+*.sh text eol=lf
