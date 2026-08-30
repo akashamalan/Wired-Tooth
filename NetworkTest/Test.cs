@@ -1,60 +1,34 @@
-using System.Net;
 using System.Net.Sockets;
 using NAudio.Wave;
+using WiredTooth.Protocol;
 
-Console.WriteLine("=== WIRED TOOTH — RECEIVER ===");
+Console.WriteLine("=== WIRED TOOTH - RECEIVER ===");
 Console.WriteLine();
 
-// === AUDIO PLAYBACK SETUP ===
+// Playback is built lazily from the first valid AUDIO packet rather than
+// hardcoded. The sender stamps its real format into every packet, so the
+// receiver never has to assume 48kHz stereo and cannot be silently wrong
+// when the capture device differs.
+BufferedWaveProvider? buffer = null;
+WaveOutEvent? waveOut = null;
+WaveFormat? format = null;
 
-// Create the audio format to match the sender:
-// 48000 Hz, 2 channels, 32-bit IEEE float
-var waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(48000, 2);
+int preBufferBytes = 0;
+bool playbackStarted = false;
 
-// BufferedWaveProvider = our JITTER BUFFER
-// It stores audio data that we feed it from the network.
-// WaveOutEvent reads from it at a steady rate.
-var buffer = new BufferedWaveProvider(waveFormat);
-
-// Max buffer: 500ms. If more audio piles up, discard oldest.
-// This prevents the buffer from growing forever if data arrives
-// faster than it plays.
-buffer.BufferLength = 48000 * 2 * 4 / 2;  // 500ms worth of bytes
-buffer.DiscardOnBufferOverflow = true;
-
-// WaveOutEvent = the audio player
-// It reads from our buffer and sends audio to speakers.
-using var waveOut = new WaveOutEvent();
-waveOut.DesiredLatency = 50;  // request low-latency from Windows audio
-
-waveOut.Init(buffer);
-
-Console.WriteLine($"Audio output: {waveFormat.SampleRate} Hz, " +
-    $"{waveFormat.Channels} ch, {waveFormat.BitsPerSample}-bit");
-Console.WriteLine($"Output latency: {waveOut.DesiredLatency} ms");
-
-// === NETWORK SETUP ===
 using UdpClient udp = new UdpClient(5000);
 
 Console.WriteLine("Listening on port 5000...");
 Console.WriteLine("Press ENTER to stop.");
 Console.WriteLine();
 
-// === PRE-BUFFER ===
-// Wait for some audio before starting playback.
-// This gives us a cushion against network jitter.
-int preBufferBytes = 48000 * 2 * 4 * 60 / 1000;  // 60ms = 23,040 bytes
-bool playbackStarted = false;
-
-// === STATS ===
-uint lastSeq = uint.MaxValue;
+uint lastSeq = 0;
+bool haveSeq = false;
 int packetsReceived = 0;
 int packetsLost = 0;
+int packetsDropped = 0;      // malformed or not ours
 int underruns = 0;
 
-// === RECEIVE LOOP ===
-// Run the receive loop in a background task.
-// The main thread waits for ENTER to stop.
 var cts = new CancellationTokenSource();
 
 var receiveTask = Task.Run(async () =>
@@ -64,56 +38,78 @@ var receiveTask = Task.Run(async () =>
         while (!cts.Token.IsCancellationRequested)
         {
             UdpReceiveResult result = await udp.ReceiveAsync(cts.Token);
-            byte[] datagram = result.Buffer;
 
-            if (datagram.Length < 12)
-                continue;
-
-            // Parse header
-            uint seq       = BitConverter.ToUInt32(datagram, 0);
-            uint timestamp = BitConverter.ToUInt32(datagram, 4);
-            uint payloadLen = BitConverter.ToUInt32(datagram, 8);
-
-            // Check for lost packets
-            if (lastSeq != uint.MaxValue && seq > lastSeq + 1)
+            // Anything that is not a well-formed WTP1 packet is discarded and
+            // counted. It never reaches the audio path and never throws.
+            if (!WtpPacket.TryParse(result.Buffer, out var header, out var payload))
             {
-                int lost = (int)(seq - lastSeq - 1);
-                packetsLost += lost;
+                packetsDropped++;
+                continue;
             }
-            lastSeq = seq;
 
-            // Extract audio data (everything after the 12-byte header)
-            int audioBytes = datagram.Length - 12;
+            if (header.Type != PacketType.Audio)
+                continue;                       // control packets arrive in WP2
 
-            // Add audio to the jitter buffer
-            buffer.AddSamples(datagram, 12, audioBytes);
+            if (header.Codec != WtpPacket.CodecPcm16)
+            {
+                packetsDropped++;               // a codec we cannot decode
+                continue;
+            }
+
+            if (format is null)
+            {
+                format = new WaveFormat((int)header.SampleRate, header.BitsPerSample,
+                                        header.Channels);
+                buffer = new BufferedWaveProvider(format)
+                {
+                    // 500 ms ceiling. If audio arrives faster than it plays,
+                    // discard the oldest rather than grow without bound.
+                    BufferLength = format.AverageBytesPerSecond / 2,
+                    DiscardOnBufferOverflow = true,
+                };
+                waveOut = new WaveOutEvent { DesiredLatency = 50 };
+                waveOut.Init(buffer);
+
+                preBufferBytes = format.AverageBytesPerSecond * 60 / 1000;   // 60 ms
+
+                Console.WriteLine($"Stream: {header.SampleRate} Hz, " +
+                    $"{header.Channels} ch, {header.BitsPerSample}-bit, codec " +
+                    $"{header.Codec}");
+                Console.WriteLine($"Output latency: {waveOut.DesiredLatency} ms, " +
+                    $"pre-buffer {preBufferBytes} bytes (60 ms)");
+                Console.WriteLine();
+            }
+
+            if (haveSeq && header.Sequence > lastSeq + 1)
+                packetsLost += (int)(header.Sequence - lastSeq - 1);
+            lastSeq = header.Sequence;
+            haveSeq = true;
+
+            if (!payload.IsEmpty)
+                buffer!.AddSamples(payload.ToArray(), 0, payload.Length);
 
             packetsReceived++;
 
-            // Start playback once we have enough audio buffered
-            if (!playbackStarted && buffer.BufferedBytes >= preBufferBytes)
+            if (!playbackStarted && buffer!.BufferedBytes >= preBufferBytes)
             {
-                waveOut.Play();
+                waveOut!.Play();
                 playbackStarted = true;
                 Console.WriteLine(">>> Playback started! <<<");
                 Console.WriteLine();
             }
 
-            // Check for underruns (buffer ran empty)
-            if (playbackStarted && buffer.BufferedBytes == 0)
-            {
+            if (playbackStarted && buffer!.BufferedBytes == 0)
                 underruns++;
-            }
 
-            // Print status every 10 packets
-            if (packetsReceived % 10 == 0)
+            if (packetsReceived % 100 == 0)
             {
-                double bufferMs = (double)buffer.BufferedBytes /
-                    (48000 * 2 * 4) * 1000;
+                double bufferMs = (double)buffer!.BufferedBytes /
+                    format!.AverageBytesPerSecond * 1000;
 
                 Console.WriteLine(
                     $"Packets: {packetsReceived} | " +
                     $"lost: {packetsLost} | " +
+                    $"dropped: {packetsDropped} | " +
                     $"buffer: {bufferMs:F0} ms | " +
                     $"underruns: {underruns}");
             }
@@ -125,14 +121,17 @@ var receiveTask = Task.Run(async () =>
 Console.ReadLine();
 
 cts.Cancel();
-waveOut.Stop();
+waveOut?.Stop();
 
 try { await receiveTask; } catch { }
+
+waveOut?.Dispose();
 
 Console.WriteLine();
 Console.WriteLine("=== FINAL STATS ===");
 Console.WriteLine($"Packets received : {packetsReceived}");
 Console.WriteLine($"Packets lost     : {packetsLost}");
+Console.WriteLine($"Packets dropped  : {packetsDropped}  (malformed / wrong magic)");
 Console.WriteLine($"Underruns        : {underruns}");
 if (packetsReceived + packetsLost > 0)
 {

@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NetworkClient", "NetworkCli
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NetworkTest", "NetworkTest\NetworkTest.csproj", "{FEE7B32D-A908-4E22-BCF8-A3CF8373DA5F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WiredTooth.Protocol", "WiredTooth.Protocol\WiredTooth.Protocol.csproj", "{EECA13C5-8007-463B-A3A5-009C12813334}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -55,6 +57,18 @@ Global
 		{FEE7B32D-A908-4E22-BCF8-A3CF8373DA5F}.Release|x64.Build.0 = Release|Any CPU
 		{FEE7B32D-A908-4E22-BCF8-A3CF8373DA5F}.Release|x86.ActiveCfg = Release|Any CPU
 		{FEE7B32D-A908-4E22-BCF8-A3CF8373DA5F}.Release|x86.Build.0 = Release|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Debug|x64.Build.0 = Debug|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Debug|x86.Build.0 = Debug|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Release|x64.ActiveCfg = Release|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Release|x64.Build.0 = Release|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Release|x86.ActiveCfg = Release|Any CPU
+		{EECA13C5-8007-463B-A3A5-009C12813334}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
