@@ -47,7 +47,27 @@ header.
 | 5 | `PONG` | sender → receiver | Echoes the PING timestamp (WP3) |
 | 6 | `BYE` | either | Clean disconnect (WP2) |
 
-Types 2–6 are defined here but only `AUDIO` is implemented as of WP1.
+All six types are implemented as of WP3: `AUDIO` in WP1, `HELLO`/`HELLO_ACK`/`BYE`
+in WP2, `PING`/`PONG` in WP3.
+
+### PING / PONG
+
+`PING` carries no payload. The probe's send time is the `timestamp` field of its
+own common header.
+
+`PONG` carries an **8-byte payload**: the `timestamp` copied verbatim out of the
+`PING` that triggered it, little-endian int64.
+
+The echo has to live in the payload because the `PONG`'s own header `timestamp`
+is the *sender's* clock, and the two clocks share no origin — each is a
+`Stopwatch` started when its own process started. Subtracting one from the other
+measures nothing. Round trip time is therefore computed entirely on the
+receiver, against its own clock:
+
+    rtt = receiver_now_us - echoed_timestamp_us
+
+which is why the sender never needs to know what the number means, and simply
+copies it back.
 
 ## Timestamps
 

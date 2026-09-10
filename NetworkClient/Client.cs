@@ -90,7 +90,9 @@ uint controlSeq = 0;
 // ---- control channel -------------------------------------------------
 var controlTask = Task.Run(async () =>
 {
-    byte[] reply = new byte[WtpPacket.CommonHeaderSize];
+    // Sized for the largest control packet we send: PONG, which carries an
+    // 8-byte echoed timestamp after the common header.
+    byte[] reply = new byte[WtpPacket.CommonHeaderSize + sizeof(long)];
     try
     {
         while (!cts.Token.IsCancellationRequested)
@@ -126,6 +128,32 @@ var controlTask = Task.Run(async () =>
                     break;
                 }
 
+                case PacketType.Ping:
+                {
+                    // Echo the probe's own timestamp straight back in the
+                    // payload. The two processes' clocks share no origin, so
+                    // the sender cannot compute anything useful from it -- it
+                    // is the receiver that subtracts, against its own clock.
+                    // A PING also proves liveness, so it counts as a keepalive.
+                    if (clients.TryGetValue(addr, out var existing))
+                        clients[addr] = existing with
+                        {
+                            LastSeenMs = Environment.TickCount64
+                        };
+
+                    Span<byte> echo = stackalloc byte[sizeof(long)];
+                    System.Buffers.Binary.BinaryPrimitives
+                        .WriteInt64LittleEndian(echo, header.TimestampMicroseconds);
+
+                    int plen = WtpPacket.WriteControl(
+                        reply, PacketType.Pong, controlSeq++,
+                        WtpPacket.TimestampMicroseconds, echo);
+                    await controlUdp.SendAsync(reply.AsMemory(0, plen),
+                                               result.RemoteEndPoint,
+                                               cts.Token);
+                    break;
+                }
+
                 case PacketType.Bye:
                     if (clients.TryRemove(addr, out _))
                     {
@@ -133,9 +161,6 @@ var controlTask = Task.Run(async () =>
                         Console.WriteLine($"Client disconnected (bye): {addr}");
                     }
                     break;
-
-                // Ping/Pong arrive in WP3. Ignored rather than rejected so an
-                // early receiver probing for RTT does not look like an error.
             }
         }
     }

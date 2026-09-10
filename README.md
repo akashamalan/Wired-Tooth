@@ -23,11 +23,17 @@ localhost. See `BUILD_PLAN.md` for the road to v1.0 and v2.0.
         |  DataAvailable
         v
   +---------------------------+
-  | 12-byte header + raw PCM  |   seq | timestamp_ms | payload_len
+  | float32 -> int16, clamped |
   +---------------------------+
         |
         v
-     UDP unicast :5000
+  +---------------------------+
+  | WTP1: 28-byte audio header|   magic | type | flags | payloadLen
+  | + PCM16, 1400 B max       |   seq | timestampUs | rate | ch | bits | codec
+  +---------------------------+
+        |
+        v
+     UDP unicast :5000 audio, :5001 control
         |
         v
   +---------------------------+
@@ -98,5 +104,7 @@ milliseconds, and underruns.
 
 - Windows Firewall blocks the first run silently. Allow the app on private networks.
 - Public and campus Wi-Fi usually block device-to-device traffic. Test on a phone hotspot.
-- Audio is currently sent as uncompressed 32-bit float PCM, roughly 384 KB/s. WP1
-  converts the wire format to 16-bit PCM.
+- Audio is sent as uncompressed 16-bit PCM, roughly 192 KB/s per client. The `codec`
+  header field stays 0 until a codec is added, if ever.
+- The full wire format is specified in [docs/PROTOCOL.md](docs/PROTOCOL.md). Write any
+  new receiver against that document, not against this diagram.
