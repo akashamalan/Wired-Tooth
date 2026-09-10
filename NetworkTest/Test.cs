@@ -1,9 +1,23 @@
+using System.Net;
 using System.Net.Sockets;
 using NAudio.Wave;
 using WiredTooth.Protocol;
 
 Console.WriteLine("=== WIRED TOOTH - RECEIVER ===");
 Console.WriteLine();
+
+const int AudioPort = 5000;
+const int ControlPort = 5001;
+const int KeepaliveMs = 1000;
+
+string senderArg = args.Length > 0 ? args[0] : "127.0.0.1";
+if (!IPAddress.TryParse(senderArg, out var senderAddress))
+{
+    Console.WriteLine($"'{senderArg}' is not an IP address. Usage: " +
+                      $"dotnet run --project NetworkTest -- <sender-ip>");
+    return;
+}
+var senderControl = new IPEndPoint(senderAddress, ControlPort);
 
 // Playback is built lazily from the first valid AUDIO packet rather than
 // hardcoded. The sender stamps its real format into every packet, so the
@@ -16,9 +30,15 @@ WaveFormat? format = null;
 int preBufferBytes = 0;
 bool playbackStarted = false;
 
-using UdpClient udp = new UdpClient(5000);
+using UdpClient audioUdp = new UdpClient(AudioPort);
 
-Console.WriteLine("Listening on port 5000...");
+// Ephemeral local port. The receiver initiates, so it does not need a
+// well-known control port of its own; the sender replies to whatever source
+// port the HELLO came from.
+using UdpClient controlUdp = new UdpClient(0);
+
+Console.WriteLine($"Audio  : listening on UDP {AudioPort}");
+Console.WriteLine($"Control: sending HELLO to {senderControl} every {KeepaliveMs} ms");
 Console.WriteLine("Press ENTER to stop.");
 Console.WriteLine();
 
@@ -28,16 +48,69 @@ int packetsReceived = 0;
 int packetsLost = 0;
 int packetsDropped = 0;      // malformed or not ours
 int underruns = 0;
+bool acked = false;
 
 var cts = new CancellationTokenSource();
+// Written by the keepalive task and by the main thread's BYE, so `seq++`
+// would be a torn read-modify-write. Harmless while nothing reads control
+// sequence numbers, but WP3 matches PONG back to PING by sequence, and a
+// duplicated number there silently corrupts an RTT sample.
+// Numbering starts at 1: Interlocked.Increment returns the new value.
+int controlSeq = 0;
+uint NextControlSeq() => (uint)Interlocked.Increment(ref controlSeq);
 
+// ---- control: HELLO keepalive ----------------------------------------
+// Every second, not once. The sender drops a client it has not heard from for
+// three seconds, so a single HELLO at startup would get us dropped mid-stream.
+var keepaliveTask = Task.Run(async () =>
+{
+    byte[] hello = new byte[WtpPacket.CommonHeaderSize];
+    try
+    {
+        while (!cts.Token.IsCancellationRequested)
+        {
+            int len = WtpPacket.WriteControl(hello, PacketType.Hello,
+                                             NextControlSeq(),
+                                             WtpPacket.TimestampMicroseconds);
+            await controlUdp.SendAsync(hello.AsMemory(0, len), senderControl,
+                                       cts.Token);
+            await Task.Delay(KeepaliveMs, cts.Token);
+        }
+    }
+    catch (OperationCanceledException) { }
+    catch (SocketException) { }
+});
+
+// ---- control: listen for HELLO_ACK -----------------------------------
+var controlTask = Task.Run(async () =>
+{
+    try
+    {
+        while (!cts.Token.IsCancellationRequested)
+        {
+            var result = await controlUdp.ReceiveAsync(cts.Token);
+            if (!WtpPacket.TryParse(result.Buffer, out var header, out _))
+                continue;
+
+            if (header.Type == PacketType.HelloAck && !acked)
+            {
+                acked = true;
+                Console.WriteLine($"Connected to sender {result.RemoteEndPoint}");
+            }
+        }
+    }
+    catch (OperationCanceledException) { }
+    catch (SocketException) { }
+});
+
+// ---- audio -----------------------------------------------------------
 var receiveTask = Task.Run(async () =>
 {
     try
     {
         while (!cts.Token.IsCancellationRequested)
         {
-            UdpReceiveResult result = await udp.ReceiveAsync(cts.Token);
+            UdpReceiveResult result = await audioUdp.ReceiveAsync(cts.Token);
 
             // Anything that is not a well-formed WTP1 packet is discarded and
             // counted. It never reaches the audio path and never throws.
@@ -48,7 +121,7 @@ var receiveTask = Task.Run(async () =>
             }
 
             if (header.Type != PacketType.Audio)
-                continue;                       // control packets arrive in WP2
+                continue;
 
             if (header.Codec != WtpPacket.CodecPcm16)
             {
@@ -120,10 +193,30 @@ var receiveTask = Task.Run(async () =>
 
 Console.ReadLine();
 
+// Stop the keepalive BEFORE saying goodbye. If it were still running, a
+// HELLO could land after the BYE and re-register this client, and the sender
+// would then sit on a dead client for the full three-second timeout -- the
+// exact delay BYE exists to avoid. The BYE send below deliberately passes no
+// cancellation token, so cancelling here does not abort it.
 cts.Cancel();
+
+// Say goodbye before tearing anything down, so the sender drops us
+// immediately instead of waiting three seconds for the keepalive to lapse.
+try
+{
+    byte[] bye = new byte[WtpPacket.CommonHeaderSize];
+    int len = WtpPacket.WriteControl(bye, PacketType.Bye, NextControlSeq(),
+                                     WtpPacket.TimestampMicroseconds);
+    await controlUdp.SendAsync(bye.AsMemory(0, len), senderControl);
+    Console.WriteLine("Sent BYE.");
+}
+catch (SocketException) { }
+
 waveOut?.Stop();
 
 try { await receiveTask; } catch { }
+try { await keepaliveTask; } catch { }
+try { await controlTask; } catch { }
 
 waveOut?.Dispose();
 
