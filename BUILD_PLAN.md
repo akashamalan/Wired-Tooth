@@ -11,15 +11,24 @@ commit, then move on. Never run two packages at once.
 ## Where you are
 
 ```
-[x] WASAPI loopback capture works
-[x] float32 -> int16 conversion
-[x] UDP send/receive on 127.0.0.1
-[x] jitter buffer + WasapiOut playback (WaveOutEvent drains 16.7% slow here, see CLAUDE.md)
-[ ] everything below
+[x] WP0  repo structure, solution, baseline commit
+[x] WP1  WTP1 protocol, float32 -> int16, 1400-byte chunking
+[x] WP2  control channel on 5001, handshake, keepalive, BYE
+[x] WP3  PING/PONG RTT, metrics CSV, plot script
+[x] WP4  clock drift correction  (61.08 ms mean, +0.54 ms over 28 min, 0 underruns)
+[x] WP5  survives drop / device change / format change / Ctrl-C
+[ ] WP6  Windows tray app          <- next for v1.0
+[ ] WP7  iOS receiver              <- needs a Mac
+[ ] WP8-10  benchmark, README, post
 ```
 
-You are roughly **25%** done. The remaining 75% is not "more features" — it's the work that
-makes it stop breaking. That's normal and it's where the interesting engineering is.
+v1.0 is **one package away**: WP6 is the tray app. Everything below the line in
+"What finished means" for v1.0 is done except criterion 6 (runs as an app, not a console)
+and criterion 1's QR-code pairing, both of which are WP6.
+
+The remaining work is not "more features" — it's the work that makes it stop breaking, and
+most of that is now behind you. WP4 alone took three wrong hypotheses and a 16.7% output
+device bug to get through.
 
 ---
 
