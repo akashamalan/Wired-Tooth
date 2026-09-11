@@ -86,7 +86,28 @@ int packetsLost = 0;
 int packetsDropped = 0;      // malformed or not ours
 int underruns = 0;
 int resyncs = 0;
+int formatChanges = 0;
+int reconnects = 0;
+int outputRebuilds = 0;
 bool acked = false;
+
+// WP5 case 2, receiver half. Set from a COM notification thread; consumed by
+// the receive loop, which is the only thread allowed to touch the playback
+// chain. The sender restarting its capture does not help here -- this process
+// holds its own WASAPI render client, bound to whatever device was default
+// when it was constructed.
+int outputRebuildFlag = 0;
+
+// WP5 case 1: no audio for this long means the stream is gone, not merely
+// jittery. Two seconds is comfortably longer than any buffer excursion but
+// short enough that a viewer notices the UI reacting rather than a hang.
+const int AudioTimeoutMs = 2000;
+long lastAudioTicks = Environment.TickCount64;
+bool reconnecting = false;
+// No audio has EVER arrived yet, so the 2s timeout must not fire before the
+// first connection -- otherwise the receiver announces "reconnecting" during
+// normal startup, before it has ever been connected to anything.
+bool everHadAudio = false;
 
 // WP4 instrumentation. Every frame entering the jitter buffer is attributed
 // to exactly one source, so an over-production of N% can be pinned on the
@@ -124,22 +145,44 @@ long jitterPeakUs = 0;
 
 var cts = new CancellationTokenSource();
 
+// Rebuilding must happen on the receive thread, so the callback only raises a
+// flag. WasapiOut cannot be disposed from a COM notification thread without
+// risking a deadlock against the audio service.
+var deviceEnum = new MMDeviceEnumerator();
+var deviceWatcher = new DefaultRenderWatcher(
+    _ => Interlocked.Exchange(ref outputRebuildFlag, 1));
+deviceEnum.RegisterEndpointNotificationCallback(deviceWatcher);
+
 // ---- control: HELLO keepalive ----------------------------------------
 // Every second, not once. The sender drops a client it has not heard from for
 // three seconds, so a single HELLO at startup would get us dropped mid-stream.
 var keepaliveTask = Task.Run(async () =>
 {
     byte[] hello = new byte[WtpPacket.CommonHeaderSize];
+
+    // While connected this is a plain 1s keepalive. Once the audio stops it
+    // becomes a reconnect probe that backs off 0.5 -> 1 -> 2 -> 5s and stays
+    // there. Backing off matters when the sender is gone for minutes: a fixed
+    // fast retry would hammer a dead host and, on a phone, hold the radio
+    // awake for nothing.
+    int backoffMs = 500;
     try
     {
         while (!cts.Token.IsCancellationRequested)
         {
+            if (!reconnecting)
+                backoffMs = 500;            // armed and ready for the next drop
+
             int len = WtpPacket.WriteControl(hello, PacketType.Hello,
                                              NextControlSeq(),
                                              WtpPacket.TimestampMicroseconds);
             await controlUdp.SendAsync(hello.AsMemory(0, len), senderControl,
                                        cts.Token);
-            await Task.Delay(KeepaliveMs, cts.Token);
+
+            int wait = reconnecting ? backoffMs : KeepaliveMs;
+            if (reconnecting)
+                backoffMs = Math.Min(backoffMs * 2, 5000);
+            await Task.Delay(wait, cts.Token);
         }
     }
     catch (OperationCanceledException) { }
@@ -185,6 +228,14 @@ var controlTask = Task.Run(async () =>
                 case PacketType.HelloAck when !acked:
                     acked = true;
                     Console.WriteLine($"Connected to sender {result.RemoteEndPoint}");
+                    break;
+
+                case PacketType.Bye:
+                    // The sender is shutting down cleanly. Drop straight into
+                    // the reconnect path rather than waiting for the audio
+                    // timeout to notice.
+                    acked = false;
+                    Console.WriteLine("Sender said BYE - reconnecting...");
                     break;
 
                 case PacketType.Pong:
@@ -239,12 +290,67 @@ var receiveTask = Task.Run(async () =>
                 continue;
             }
 
+            // A gap longer than the audio timeout is a dropped link, not lost
+            // packets. Re-baselining the sequence stops the reconnect being
+            // charged thousands of "lost" packets it never had a chance to
+            // receive, which would make the loss figure meaningless.
+            if (Environment.TickCount64 - Volatile.Read(ref lastAudioTicks) > AudioTimeoutMs)
+            {
+                haveSeq = false;
+                resampler?.Reset();
+            }
+            Volatile.Write(ref lastAudioTicks, Environment.TickCount64);
+            everHadAudio = true;
+
             long offsetUs = WtpPacket.TimestampMicroseconds - header.TimestampMicroseconds;
             if (offsetUs < minTransitOffsetUs)
                 minTransitOffsetUs = offsetUs;
             long jitterUs = offsetUs - minTransitOffsetUs;
             if (jitterUs > jitterPeakUs)
                 jitterPeakUs = jitterUs;
+
+            // WP5 case 3: the sender re-stamps the new rate/channels/depth in
+            // every audio header when its capture device changes, so a format
+            // change is detected here rather than signalled out of band.
+            bool deviceChanged = Interlocked.Exchange(ref outputRebuildFlag, 0) == 1;
+            bool formatChanged = format is not null &&
+                ((int)header.SampleRate != format.SampleRate ||
+                 header.Channels != format.Channels ||
+                 header.BitsPerSample != format.BitsPerSample);
+
+            if (formatChanged || (deviceChanged && format is not null))
+            {
+                Console.WriteLine();
+                if (formatChanged)
+                    Console.WriteLine(
+                        $"Format changed: {format!.SampleRate} Hz {format.Channels} ch " +
+                        $"{format.BitsPerSample}-bit  ->  {header.SampleRate} Hz " +
+                        $"{header.Channels} ch {header.BitsPerSample}-bit");
+                else
+                {
+                    Console.WriteLine("[device] default render device changed - " +
+                                      "rebuilding playback");
+                    outputRebuilds++;
+                }
+
+                // The whole chain goes together, not piecemeal. The resampler's
+                // channel count is fixed at construction, and the buffer's
+                // AverageBytesPerSecond is baked into every depth calculation
+                // the drift loop makes. Keeping either across a format change
+                // would corrupt playback and the control loop simultaneously,
+                // and the drift loop would chase a setpoint measured in the
+                // wrong units.
+                playbackStarted = false;        // stops the drift loop reading
+                try { waveOut?.Stop(); } catch (Exception) { }
+                waveOut?.Dispose();
+                waveOut = null;
+                buffer = null;
+                resampler = null;
+                format = null;
+                lastPayloadFrames = 0;
+                resyncing = false;
+                formatChanges++;
+            }
 
             if (format is null)
             {
@@ -431,10 +537,39 @@ var driftTask = Task.Run(async () =>
         while (!cts.Token.IsCancellationRequested)
         {
             await Task.Delay(100, cts.Token);
+
+            // Link state is evaluated here, not in the keepalive task. Tying it
+            // to the keepalive meant that once the backoff reached 5s the
+            // receiver kept showing "reconnecting" for up to five seconds after
+            // audio had already resumed. Measured: audio returned at t=36s and
+            // the UI only caught up at t=41s.
+            long sinceAudio = Environment.TickCount64 - Volatile.Read(ref lastAudioTicks);
+            bool lost = everHadAudio && sinceAudio > AudioTimeoutMs;
+            if (lost && !reconnecting)
+            {
+                reconnecting = true;
+                Interlocked.Increment(ref reconnects);
+                Console.WriteLine($"[link] no audio for {sinceAudio} ms - reconnecting...");
+            }
+            else if (!lost && reconnecting)
+            {
+                reconnecting = false;
+                Console.WriteLine("[link] audio resumed - connected");
+            }
+
             if (!playbackStarted || format is null || buffer is null)
                 continue;
+
             double depthMs = (double)buffer.BufferedBytes
                              / format.AverageBytesPerSecond * 1000.0;
+
+            // Underruns are counted HERE rather than in the receive loop. That
+            // check only ran when a packet arrived, so a total outage -- the
+            // one case guaranteed to starve playback -- recorded exactly zero
+            // underruns, because no packets were arriving to trigger it. A
+            // 20-second silent gap reported 0 underruns in testing.
+            if (buffer.BufferedBytes == 0)
+                Interlocked.Increment(ref underruns);
 
             // Resync guard.
             //
@@ -511,13 +646,33 @@ var metricsTask = Task.Run(async () =>
             Console.WriteLine(
                 $"[{elapsed,4}s] rtt {medianRtt,6:F2} ms | buffer {bufferMs,6:F1} ms | " +
                 $"est {est,6:F1} ms | ratio {drift.Ratio:F5} | " +
-                $"rx {recv} lost {lost} under {under}");
+                $"rx {recv} lost {lost} under {under}" +
+                (reconnecting ? "  [RECONNECTING]" : ""));
         }
     }
     catch (OperationCanceledException) { }
 });
 
-Console.ReadLine();
+// WP5 case 4: ENTER and Ctrl-C run the SAME shutdown path. Ctrl-C used to
+// terminate the process outright, skipping the BYE and leaving the sender to
+// wait out its full 3s client timeout. e.Cancel=true reclaims the
+// termination so the cleanup below runs.
+var stopping = new TaskCompletionSource();
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    Console.WriteLine();
+    Console.WriteLine("Ctrl-C: shutting down...");
+    stopping.TrySetResult();
+};
+_ = Task.Run(() =>
+{
+    // Returns immediately on EOF when stdin is not a console, which is how
+    // the scripted test runs drive shutdown.
+    Console.ReadLine();
+    stopping.TrySetResult();
+});
+await stopping.Task;
 
 // Stop the keepalive BEFORE saying goodbye. If it were still running, a
 // HELLO could land after the BYE and re-register this client, and the sender
@@ -548,6 +703,8 @@ try { await driftTask; } catch { }
 try { await metricsTask; } catch { }
 
 waveOut?.Dispose();
+try { deviceEnum.UnregisterEndpointNotificationCallback(deviceWatcher); }
+catch (Exception) { }
 
 Console.WriteLine();
 Console.WriteLine("=== FINAL STATS ===");
@@ -556,6 +713,9 @@ Console.WriteLine($"Packets lost     : {packetsLost}");
 Console.WriteLine($"Packets dropped  : {packetsDropped}  (malformed / wrong magic)");
 Console.WriteLine($"Underruns        : {underruns}");
 Console.WriteLine($"Resyncs          : {resyncs}  (buffer discarded to target)");
+Console.WriteLine($"Format changes   : {formatChanges}  (playback chain rebuilt)");
+Console.WriteLine($"Reconnects       : {reconnects}  (audio gaps > {AudioTimeoutMs} ms)");
+Console.WriteLine($"Output rebuilds  : {outputRebuilds}  (render device changes)");
 Console.WriteLine($"Median RTT       : {rtt.Median:F2} ms  ({rtt.Count} samples)");
 Console.WriteLine($"Final ratio      : {drift.Ratio:F6}  (target {drift.TargetMs:F0} ms)");
 if (packetsReceived + packetsLost > 0)
