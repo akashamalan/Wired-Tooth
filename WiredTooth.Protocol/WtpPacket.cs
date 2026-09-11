@@ -51,6 +51,20 @@ public static class WtpPacket
 
     public const byte CodecPcm16 = 0;
 
+    /// <summary>
+    /// How much silence a silence-flagged AUDIO packet with an empty payload
+    /// stands for, in milliseconds.
+    ///
+    /// WASAPI loopback stops firing DataAvailable entirely when nothing is
+    /// playing, so the sender emits one of these every SilenceKeepaliveMs to
+    /// keep the receiver's buffer fed and its RTT tracking alive. The duration
+    /// cannot be derived from the packet -- the payload is empty by design, to
+    /// avoid sending kilobytes of zeros -- so it is a shared constant and both
+    /// implementations must agree on it. The Swift receiver reads this value
+    /// from docs/PROTOCOL.md.
+    /// </summary>
+    public const int SilenceKeepaliveMs = 100;
+
     // Microseconds, not milliseconds: at 48kHz one millisecond is 48 frames,
     // which is far too coarse to measure a latency figure that is the whole
     // point of the project. Stopwatch, not DateTime, because we need a

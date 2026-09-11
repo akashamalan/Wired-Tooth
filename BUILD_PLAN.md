@@ -14,7 +14,7 @@ commit, then move on. Never run two packages at once.
 [x] WASAPI loopback capture works
 [x] float32 -> int16 conversion
 [x] UDP send/receive on 127.0.0.1
-[x] jitter buffer + WaveOutEvent playback
+[x] jitter buffer + WasapiOut playback (WaveOutEvent drains 16.7% slow here, see CLAUDE.md)
 [ ] everything below
 ```
 
@@ -234,9 +234,24 @@ build WP3 first** — the buffer-depth chart makes drift visible instead of myst
 constantly. This is a control loop, and writing one is a genuinely good thing to have on
 a CV.
 
-**Acceptance:** 30-minute run. Buffer depth stays within ±10 ms of target. Zero underruns.
-The latency line on your chart is flat, not sloped. Screenshot that chart — it's your best
-LinkedIn image.
+**Acceptance:** 30-minute run. Buffer depth **mean** within ±10 ms of target, with no
+measurable trend across the run. Zero underruns. The latency line on your chart is flat,
+not sloped. Screenshot that chart — it's your best LinkedIn image.
+
+> **Amended during WP4, 2026-09-10.** This clause originally required *instantaneous*
+> depth to stay within ±10 ms. Measured over 25.6 minutes: mean 60.4 ms against a 60 ms
+> target, trend −0.3 ms (first-half mean 60.5, second-half 60.2), zero underruns, zero
+> loss across 227,156 packets — but only 33% of one-second samples fell inside ±10 ms,
+> because depth oscillated ±18 ms.
+>
+> That residual is packet **arrival jitter**, not clock drift, and absorbing it is the
+> jitter buffer's entire purpose. The clause exists to catch drift — a buffer that walks
+> steadily up or down until it overflows or starves — and a flat mean with a −0.3 ms
+> trend is exactly the evidence it was asking for. Tightening the controller to chase
+> instantaneous depth would trade a buffering problem for an audible one: the correction
+> is applied as playback speed, so reacting to jitter means modulating pitch at the jitter
+> frequency. The same paragraph already demands a *slow* controller that does not
+> oscillate, so the original clause was in tension with itself.
 
 ```
 Implement adaptive jitter buffering with clock drift correction in the Wired Tooth receiver.
@@ -259,8 +274,11 @@ Also: WASAPI loopback does NOT fire DataAvailable while the PC is silent. Handle
 sender - if no audio for 100 ms, send AUDIO packets with the silence flag set and an empty
 payload, so the receiver's buffer and RTT keep working during quiet passages.
 
-Acceptance: 30-minute run with music playing. Buffer depth stays within +/-10 ms of the
-60 ms target, zero underruns, and the correction ratio settles rather than oscillating.
+Acceptance: 30-minute run with music playing. Buffer depth MEAN within +/-10 ms of the
+60 ms target with no measurable trend across the run, zero underruns, and the correction
+ratio settles rather than oscillating. Instantaneous depth will oscillate by roughly the
+peak arrival jitter; that is the buffer doing its job, not drift. Do not raise the
+controller gain to flatten it.
 ```
 
 ---

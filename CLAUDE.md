@@ -22,7 +22,7 @@ Windows app audio
   → Wi-Fi
   → jitter buffer (60 ms target)
   → clock-drift correction (continuous resampling, ±0.5% clamp)
-  → audio output (WaveOutEvent on Windows / AVAudioEngine on iOS)
+  → audio output (WasapiOut shared mode on Windows / AVAudioEngine on iOS)
   → wired earbuds
 ```
 
@@ -65,6 +65,16 @@ Windows app audio
 - **Clock drift is the main enemy.** Sender and receiver sound cards are never at exactly
   the same rate. Without correction, the buffer drains or grows and it fails after ~20
   minutes, not immediately. Always test for 30 minutes, never 30 seconds.
+- **Use `WasapiOut`, never `WaveOutEvent`, for playback.** Measured on this machine,
+  same device and same format, with no networking involved at all:
+  `WaveOutEvent` (WinMM) drained 39,977 frames/s, **-16.7%** of real time, while
+  `WasapiOut` (shared mode) drained 48,219 frames/s, **+0.46%**. The default render
+  endpoint here is a virtual device (FxSound Audio Enhancer) and WinMM runs it far
+  slower than real time. No drift controller can close a 16.7% gap -- the clamp is
+  +/-0.5% precisely so corrections stay inaudible -- so the jitter buffer fills to
+  its ceiling and stays there no matter what the control loop commands. This cost a
+  full work package to find, because every symptom pointed at the sender or the
+  buffer rather than at the output device.
 - **Lightning EarPods are iPhone 14 and earlier.** iPhone 15+ is USB-C.
 - **Windows Firewall silently blocks the first run.** Private networks must be allowed.
 - **Public/campus Wi-Fi usually blocks device-to-device traffic** (AP client isolation).

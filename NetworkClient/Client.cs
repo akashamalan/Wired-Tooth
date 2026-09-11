@@ -193,9 +193,13 @@ var reaperTask = Task.Run(async () =>
 });
 
 // ---- audio -----------------------------------------------------------
-uint sequenceNumber = 0;
+// int, not uint, because the silence keepalive timer now emits packets from a
+// second thread and Interlocked has no uint overload. Wrapping at 2^31 instead
+// of 2^32 costs nothing: at ~140 packets/s that is 177 days of streaming.
+int sequenceNumber = 0;
 long totalBytesSent = 0;
 int packetsSent = 0;
+long lastAudioTicks = Environment.TickCount64;
 
 // Reused across callbacks. DataAvailable fires on one capture thread, so a
 // single scratch buffer per process is safe and keeps this allocation-free
@@ -214,6 +218,8 @@ capture.DataAvailable += (sender, e) =>
     if (current.Length == 0)
         return;
 
+    Volatile.Write(ref lastAudioTicks, Environment.TickCount64);
+
     int pcmBytes = Pcm.FloatToInt16(e.Buffer.AsSpan(0, e.BytesRecorded), pcm16);
 
     // One WASAPI buffer is typically several KB, which is well over the
@@ -223,7 +229,8 @@ capture.DataAvailable += (sender, e) =>
         int chunk = Math.Min(maxPayload, pcmBytes - offset);
 
         int headerLen = WtpPacket.WriteAudioHeader(
-            packet, sequenceNumber, WtpPacket.TimestampMicroseconds,
+            packet, (uint)Interlocked.Increment(ref sequenceNumber),
+            WtpPacket.TimestampMicroseconds,
             chunk, sampleRate, channels, 16);
 
         pcm16.AsSpan(offset, chunk).CopyTo(packet.AsSpan(headerLen));
@@ -243,7 +250,6 @@ capture.DataAvailable += (sender, e) =>
         }
 
         totalBytesSent += (long)(headerLen + chunk) * current.Length;
-        sequenceNumber++;
         packetsSent++;
     }
 
@@ -257,6 +263,47 @@ capture.DataAvailable += (sender, e) =>
     }
 };
 
+// ---- silence keepalive -----------------------------------------------
+// WASAPI loopback does not fire DataAvailable at all while the PC is silent
+// -- it does not deliver buffers of zeros, it simply stops. Without this the
+// receiver's buffer drains to empty during any quiet passage, underruns, and
+// then has to refill from scratch when audio returns. These packets carry no
+// payload; the receiver expands each into WtpPacket.SilenceKeepaliveMs of
+// silence, which is a wire contract both ends share.
+var silenceTask = Task.Run(async () =>
+{
+    byte[] silence = new byte[WtpPacket.AudioHeaderSize];
+    try
+    {
+        while (!cts.Token.IsCancellationRequested)
+        {
+            await Task.Delay(WtpPacket.SilenceKeepaliveMs / 2, cts.Token);
+
+            var current = targets.Current;
+            if (current.Length == 0)
+                continue;
+            if (Environment.TickCount64 - Volatile.Read(ref lastAudioTicks)
+                < WtpPacket.SilenceKeepaliveMs)
+                continue;
+
+            int len = WtpPacket.WriteAudioHeader(
+                silence, (uint)Interlocked.Increment(ref sequenceNumber),
+                WtpPacket.TimestampMicroseconds,
+                payloadLength: 0, sampleRate, channels, 16,
+                PacketFlags.Silence);
+
+            foreach (var target in current)
+            {
+                try { audioUdp.Send(silence, len, target); }
+                catch (SocketException) { }
+            }
+
+            Volatile.Write(ref lastAudioTicks, Environment.TickCount64);
+        }
+    }
+    catch (OperationCanceledException) { }
+});
+
 capture.StartRecording();
 
 Console.ReadLine();
@@ -266,6 +313,7 @@ cts.Cancel();
 controlUdp.Close();
 try { await controlTask; } catch { }
 try { await reaperTask; } catch { }
+try { await silenceTask; } catch { }
 
 Console.WriteLine();
 Console.WriteLine($"Stopped. Total packets sent: {sequenceNumber}");
