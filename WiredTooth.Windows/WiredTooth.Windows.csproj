@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
+    <!-- WPF has no tray icon of its own. WinForms' NotifyIcon is the standard
+         answer and costs no extra package. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+    <ProjectReference Include="..\WiredTooth.Sender\WiredTooth.Sender.csproj" />
+    <ProjectReference Include="..\WiredTooth.Protocol\WiredTooth.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>
