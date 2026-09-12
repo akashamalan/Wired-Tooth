@@ -17,14 +17,28 @@ commit, then move on. Never run two packages at once.
 [x] WP3  PING/PONG RTT, metrics CSV, plot script
 [x] WP4  clock drift correction  (61.08 ms mean, +0.54 ms over 28 min, 0 underruns)
 [x] WP5  survives drop / device change / format change / Ctrl-C
-[ ] WP6  Windows tray app          <- next for v1.0
+[x] WP6  Windows tray app, QR pairing, --console
 [ ] WP7  iOS receiver              <- needs a Mac
-[ ] WP8-10  benchmark, README, post
+[ ] WP8  acoustic benchmark        <- needs a mic + the earbuds
+[ ] WP9  README + engineering notes
+[ ] WP10 the post
 ```
 
-v1.0 is **one package away**: WP6 is the tray app. Everything below the line in
-"What finished means" for v1.0 is done except criterion 6 (runs as an app, not a console)
-and criterion 1's QR-code pairing, both of which are WP6.
+**v1.0 criteria, honestly scored** (see "What finished means" below):
+
+| # | Criterion | State |
+|---|---|---|
+| 1 | Streams to a second device over real Wi-Fi | **not proven** — no second device exists yet |
+| 2 | Survives 30 minutes unattended | done (61.08 ms mean, +0.54 ms over 28 min, 0 underruns) |
+| 3 | Recovers from disruption | done |
+| 4 | Handles device changes | done |
+| 5 | Measured, not guessed, latency | **partial** — ~110 ms estimated; the acoustic number is WP8 |
+| 6 | Runs as an app, not a console | done |
+| 7 | Documented | **partial** — PROTOCOL/MEASUREMENT/IOS_AUDIO exist, README is still WP1-era |
+
+Criterion 1 is the interesting one: the QR code, the handshake and the address picker are
+all built and working, but nothing has ever received this stream except this same PC.
+Loopback cannot fail the way Wi-Fi fails.
 
 The remaining work is not "more features" — it's the work that makes it stop breaking, and
 most of that is now behind you. WP4 alone took three wrong hypotheses and a 16.7% output

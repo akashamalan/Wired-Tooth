@@ -33,9 +33,10 @@ Windows app audio
 | `AudioInspect/` | Diagnostic tool | Prints the capture format and raw samples. **Never delete.** First thing to run when audio sounds wrong. |
 | `NetworkClient/` | Sender | WASAPI → UDP. Console. |
 | `NetworkTest/` | Windows receiver | UDP → playback. Kept permanently as the regression test. |
-| `MacReceiver/` | Python test receivers | `receiver_stats.py` (stdlib, counts packets), `receiver_play.py` (plays audio). Not yet written. |
+| `MacReceiver/` | Python test receivers | `receiver_stats.py` (stdlib, counts packets, reports loss/RTT/jitter) exists and is the real-network test tool. `receiver_play.py` not written. |
 | `WiredTooth.Protocol/` | Shared packet code | Created in WP1. |
-| `WiredTooth.Windows/` | Tray app | Created in WP6. |
+| `WiredTooth.Sender/` | Shared sender | AudioSender + LocalAddress. Used by NetworkClient and the tray app. Created in WP6. |
+| `WiredTooth.Windows/` | Tray app | WPF tray icon, status window, QR pairing, `--console`. Created in WP6. |
 | `ios/` | Swift receiver | Created in WP7. |
 
 ## Hard rules
