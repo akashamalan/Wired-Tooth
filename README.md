@@ -137,11 +137,35 @@ boundaries. Resetting phase per packet would click 140 times a second.
 
 ## Build
 
-Requires the .NET 10 SDK on Windows.
+Requires the **.NET 10 SDK on Windows**. Windows specifically, not just
+Windows-preferred: capture is WASAPI loopback and playback is WASAPI shared
+mode, and the tray app is WPF. There is no cross-platform build.
 
 ```
 dotnet build WiredTooth.sln
 ```
+
+That builds all six projects. NAudio and QRCoder restore from NuGet; nothing
+else is needed for the applications themselves.
+
+### Python tooling
+
+The applications need no Python. The measurement and analysis tools do, and
+they deliberately do not share one dependency list — the tool most likely to
+run on a borrowed machine has no dependencies at all.
+
+| Tool | Needs | Why |
+|---|---|---|
+| `MacReceiver/receiver_stats.py` | **nothing** — stdlib only | It runs on whatever second device you can find. Requiring `pip install` on a borrowed laptop is how a test does not get run. |
+| `tools/plot_metrics.py` | `matplotlib` | Charts the metrics CSV. |
+| `tools/acoustic.py` | `numpy` | FFT cross-correlation for the latency measurement. |
+
+```
+pip install numpy matplotlib
+```
+
+Python 3.9 or newer. Verified here on 3.14.3 with numpy 2.4.4 and matplotlib
+3.11.1.
 
 ## Run
 
@@ -179,6 +203,27 @@ python tools/plot_metrics.py metrics_20260911_110230.csv
 python3 MacReceiver/receiver_stats.py 192.168.1.42 --seconds 120
 ```
 
+Reports loss, RTT median/p95/max, transit jitter and bitrate, and exits
+non-zero if loss reaches 1%, so it can gate a script.
+
+**Measure real latency acoustically.** Generate the click track, play it while
+recording the room with one microphone, and analyse:
+
+```
+python tools/acoustic.py generate -o clicks.wav
+```
+
+```
+python tools/acoustic.py measure recording.wav --reference reference.wav
+```
+
+Record the `--reference` pass first with the earbud silent. A click reflecting
+off a desk lands 5-15 ms behind the direct sound, which is the same range as a
+good result, so without it a reflection cannot be told from the earbud — and
+the tool will refuse to answer rather than guess. Verify the analyser against
+known delays with `python tools/acoustic.py selftest`. Full procedure and the
+three configurations to compare: [tools/benchmark.md](tools/benchmark.md).
+
 **Diagnostics.** `AudioInspect` prints the capture format and raw sample values
 — the first thing to run when audio sounds wrong. `NetworkTest --waveout`
 selects the old WinMM output backend, which reproduces the 16.7% drain
@@ -207,7 +252,9 @@ described in [docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md).
 ## What I'd do next
 
 1. **The acoustic measurement.** Everything else is guesswork until the number
-   includes the parts no API reports.
+   includes the parts no API reports. The tooling is written and self-tested
+   ([tools/benchmark.md](tools/benchmark.md)); it needs a microphone, the
+   earbuds, and a Bluetooth headset to compare against.
 2. **The iOS receiver**, which is also the only thing that proves the Wi-Fi
    path works at all.
 3. **A `STATS` control packet**, so the sender can display what the receiver
@@ -225,5 +272,5 @@ described in [docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md).
 | `NetworkTest/` | Windows receiver: jitter buffer, drift correction, metrics. |
 | `AudioInspect/` | Capture-format diagnostic. |
 | `MacReceiver/` | Stdlib Python statistics receiver for a second machine. |
-| `tools/` | `plot_metrics.py`. |
+| `tools/` | `plot_metrics.py` charts a run; `acoustic.py` measures real latency. |
 | `docs/` | Protocol, measurement method, iOS routing, engineering notes. |
