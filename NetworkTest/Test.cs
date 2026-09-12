@@ -30,6 +30,15 @@ const int RttWindow = 20;
 // ordinary clock difference, which is exactly what the controller is for.
 const int OutputLatencyMs = 50;
 
+// Debug flag, kept so the WP4 finding stays reproducible rather than being
+// a claim in a document. --waveout selects the OLD output backend, which on
+// this machine drains 16.7% slow and pins the jitter buffer at its ceiling.
+// Running with and without it regenerates the before/after charts in
+// docs/ENGINEERING_NOTES.md.
+bool useWaveOut = args.Any(a =>
+    a.Equals("--waveout", StringComparison.OrdinalIgnoreCase));
+args = [.. args.Where(a => !a.StartsWith("--", StringComparison.Ordinal))];
+
 string senderArg = args.Length > 0 ? args[0] : "127.0.0.1";
 if (!IPAddress.TryParse(senderArg, out var senderAddress))
 {
@@ -55,7 +64,7 @@ LinearResampler? resampler = null;
 // receiver never has to assume 48kHz stereo and cannot be silently wrong
 // when the capture device differs.
 BufferedWaveProvider? buffer = null;
-WasapiOut? waveOut = null;
+IWavePlayer? waveOut = null;
 WaveFormat? format = null;
 
 int preBufferBytes = 0;
@@ -76,6 +85,7 @@ Console.WriteLine($"Control: HELLO every {KeepaliveMs} ms, PING every " +
 Console.WriteLine($"Metrics: {csvPath}");
 Console.WriteLine($"Buffer : target {targetBufferMs:F0} ms, drift correction " +
                   $"clamped to +/-{DriftController.MaxDeviation * 100:F1}%");
+Console.WriteLine($"Output : {(useWaveOut ? "WaveOutEvent (WinMM, DEBUG)" : "WasapiOut shared")}");
 Console.WriteLine("Press ENTER to stop.");
 Console.WriteLine();
 
@@ -363,8 +373,20 @@ var receiveTask = Task.Run(async () =>
                     BufferLength = format.AverageBytesPerSecond / 2,
                     DiscardOnBufferOverflow = true,
                 };
-                waveOut = new WasapiOut(AudioClientShareMode.Shared, OutputLatencyMs);
-                waveOut.Init(buffer);
+                if (useWaveOut)
+                {
+                    var wo = new WaveOutEvent { DesiredLatency = OutputLatencyMs };
+                    wo.Init(buffer);
+                    waveOut = wo;
+                    Console.WriteLine("*** --waveout: using WaveOutEvent (WinMM). " +
+                                      "Measured 16.7% slow on this machine. ***");
+                }
+                else
+                {
+                    var wo = new WasapiOut(AudioClientShareMode.Shared, OutputLatencyMs);
+                    wo.Init(buffer);
+                    waveOut = wo;
+                }
 
                 resampler = new LinearResampler(format.Channels);
                 lastFrame = new short[format.Channels];
