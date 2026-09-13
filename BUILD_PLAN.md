@@ -18,9 +18,10 @@ commit, then move on. Never run two packages at once.
 [x] WP4  clock drift correction  (61.08 ms mean, +0.54 ms over 28 min, 0 underruns)
 [x] WP5  survives drop / device change / format change / Ctrl-C
 [x] WP6  Windows tray app, QR pairing, --console
-[ ] WP7  iOS receiver              <- needs a Mac
-[ ] WP8  acoustic benchmark        <- needs a mic + the earbuds
-[ ] WP9  README + engineering notes
+[x] WP7  Android receiver (substituted for iOS - see note below)
+[ ] WP7-iOS  Swift receiver        <- still open, needs a Mac
+[~] WP8  acoustic benchmark        <- tooling done + self-tested; needs a mic
+[x] WP9  README + engineering notes
 [ ] WP10 the post
 ```
 
@@ -28,17 +29,25 @@ commit, then move on. Never run two packages at once.
 
 | # | Criterion | State |
 |---|---|---|
-| 1 | Streams to a second device over real Wi-Fi | **not proven** — no second device exists yet |
+| 1 | Streams to a second device over real Wi-Fi | **done** — 13,721 packets, 0.04% loss, 10.52 ms RTT, Windows to Mac |
 | 2 | Survives 30 minutes unattended | done (61.08 ms mean, +0.54 ms over 28 min, 0 underruns) |
 | 3 | Recovers from disruption | done |
 | 4 | Handles device changes | done |
-| 5 | Measured, not guessed, latency | **partial** — ~110 ms estimated; the acoustic number is WP8 |
+| 5 | Measured, not guessed, latency | **partial** — 10.52 ms RTT measured over Wi-Fi; the acoustic end-to-end number is WP8 |
 | 6 | Runs as an app, not a console | done |
-| 7 | Documented | **partial** — PROTOCOL/MEASUREMENT/IOS_AUDIO exist, README is still WP1-era |
+| 7 | Documented | **done** — README, PROTOCOL, MEASUREMENT, ENGINEERING_NOTES, IOS_AUDIO |
 
-Criterion 1 is the interesting one: the QR code, the handshake and the address picker are
-all built and working, but nothing has ever received this stream except this same PC.
-Loopback cannot fail the way Wi-Fi fails.
+Criterion 1 is now proven on a real network: 13,721 packets at 0.04% loss and 10.52 ms
+median RTT, Windows to Mac over Wi-Fi. Every number before that was loopback, which
+cannot fail the way Wi-Fi fails.
+
+**WP7 was delivered as an Android receiver rather than the iOS one this plan specifies.**
+That is a deliberate substitution. Android Studio runs on Windows, so `AndroidReceiver/`
+could be built, unit-tested and installed from the same machine as the sender; Xcode is
+macOS-only, so every line of a Swift receiver would have stayed unverifiable until a Mac
+appeared. `docs/IOS_AUDIO.md` still stands and the Swift receiver is still open work --
+the Kotlin receiver is now the reference to port from, and its parser tests are the ones
+a Swift parser has to pass.
 
 The remaining work is not "more features" — it's the work that makes it stop breaking, and
 most of that is now behind you. WP4 alone took three wrong hypotheses and a 16.7% output

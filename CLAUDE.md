@@ -37,7 +37,8 @@ Windows app audio
 | `WiredTooth.Protocol/` | Shared packet code | Created in WP1. |
 | `WiredTooth.Sender/` | Shared sender | AudioSender + LocalAddress. Used by NetworkClient and the tray app. Created in WP6. |
 | `WiredTooth.Windows/` | Tray app | WPF tray icon, status window, QR pairing, `--console`. Created in WP6. |
-| `ios/` | Swift receiver | Created in WP7. |
+| `AndroidReceiver/` | Android receiver | Kotlin, AudioTrack playback. Built and unit-tested on Windows. Created in WP7. |
+| `ios/` | Swift receiver | Not written. Xcode is macOS-only; Android was substituted. See docs/IOS_AUDIO.md. |
 
 ## Hard rules
 
