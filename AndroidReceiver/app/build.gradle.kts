@@ -1,6 +1,8 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    // Kotlin 2.0 moved the Compose compiler out of AGP into its own plugin.
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -32,11 +34,24 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    buildFeatures {
+        compose = true
+    }
 }
 
 dependencies {
-    // Deliberately nothing else. No AppCompat, no Material, no Compose: the UI
-    // is four numbers and a status line, and every dependency added here is
-    // another thing that can fail to resolve on a machine that is offline.
+    val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
+    implementation(composeBom)
+
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.foundation:foundation")
+
+    // Deliberately NOT Material3. This interface follows Apple's visual
+    // language, and Material brings its own type ramp, shapes, ripple and
+    // colour semantics that would have to be fought at every component.
+    // foundation gives layout, gestures and BasicText; the rest is ours.
+
     testImplementation("junit:junit:4.13.2")
 }
