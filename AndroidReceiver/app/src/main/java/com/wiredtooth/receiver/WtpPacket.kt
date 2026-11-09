@@ -42,6 +42,30 @@ object Wtp {
 
     const val FLAG_SILENCE = 0x01
 
+    /**
+     * Stream id, carried in flags bits 1-7.
+     *
+     * WHY THE FLAGS BYTE AND NOT A NEW FIELD: the audio sub-header at offsets
+     * 20..27 is fully allocated -- sampleRate(4) + channels(2) + bits(1) +
+     * codec(1) = 8 exactly. There is no spare byte. Adding one would grow the
+     * header to 29 bytes and force a WTP2 magic, which every shipped receiver
+     * would then reject outright. The 7 bits the spec already reserves in the
+     * flags byte are the only unallocated space, they hold 128 streams, and
+     * using them leaves the header at 28 bytes and the magic at WTP1.
+     *
+     * OLD SENDERS FALL BACK FOR FREE: a sender that knows nothing about
+     * streams writes flags = 0 or flags = FLAG_SILENCE, so bits 1-7 are zero
+     * and every packet reads as stream 0. No version negotiation, no probing.
+     *
+     * The mirror-image caution belongs on the SENDER: this parser has always
+     * ignored the reserved bits, so an old receiver would happily play every
+     * stream mixed together. Compatibility is therefore enforced by the sender
+     * only emitting non-zero ids to clients that asked for them.
+     */
+    const val STREAM_ID_SHIFT = 1
+    const val STREAM_ID_MASK = 0xFE
+    const val MAX_STREAM_ID = 127
+
     private val startNanos = System.nanoTime()
 
     /**
@@ -101,6 +125,13 @@ object Wtp {
         val payloadOffset: Int,
     ) {
         val isSilence: Boolean get() = (flags and FLAG_SILENCE) != 0
+
+        /**
+         * Which stream this packet belongs to. 0 is the whole-system mix that
+         * every sender has always produced, so this reads 0 for every packet
+         * ever sent by an older sender.
+         */
+        val streamId: Int get() = (flags and STREAM_ID_MASK) ushr STREAM_ID_SHIFT
     }
 
     /**
