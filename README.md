@@ -169,14 +169,19 @@ Python 3.9 or newer. Verified here on 3.14.3 with numpy 2.4.4 and matplotlib
 
 ## Run
 
-**Tray app** (the normal way):
+**Windows app** (the normal way):
 
 ```
 dotnet run --project WiredTooth.Windows
 ```
 
-Tray icon, right-click for status and a QR code encoding
-`wiredtooth://<ip>:5000`. `--console` keeps the old console behaviour.
+Opens a window showing whether it is streaming, a pairing QR encoding
+`wiredtooth://<ip>:5000`, the phones currently connected, and session stats.
+"If it isn't working" runs read-only checks -- addresses, bound ports, the
+Windows Firewall -- and names the cause rather than leaving you to guess.
+
+Closing the window keeps it streaming from the notification area; Exit there
+quits. `--console` keeps the old console behaviour.
 
 **Console sender and receiver** (the debugging path):
 
@@ -244,9 +249,9 @@ described in [docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md).
   breaking compatibility; it is 0 and unused.
 - **No encryption or authentication.** Anything on the network that sends a
   valid `HELLO` receives the stream.
-- **The tray status window cannot show latency, loss or buffer depth.** Those
-  are measured at the receiver, and WTP1 has no packet type to report them
-  back. The window says so rather than displaying zeros.
+- **The Windows app cannot show latency, loss or buffer depth.** Those are
+  measured at the receiver, and WTP1 has no packet type to report them back.
+  The window says so rather than displaying zeros; the phone shows its own.
 - **IPv4 only.**
 
 ## What I'd do next
@@ -267,7 +272,7 @@ described in [docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md).
 |---|---|
 | `WiredTooth.Protocol/` | WTP1 wire format. Shared, and mirrored by the Python receiver. |
 | `WiredTooth.Sender/` | The sender: capture, packetisation, control channel, device handling. |
-| `WiredTooth.Windows/` | WPF tray app, status window, QR pairing. |
+| `WiredTooth.Windows/` | WPF desktop app: status, QR pairing, connected phones, network checks. Tray icon keeps it alive when closed. |
 | `NetworkClient/` | Console front-end over the same sender. Debugging and regression. |
 | `NetworkTest/` | Windows receiver: jitter buffer, drift correction, metrics. |
 | `AudioInspect/` | Capture-format diagnostic. |
