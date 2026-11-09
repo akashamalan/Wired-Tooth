@@ -295,4 +295,39 @@ object Mixing {
             out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
         }
     }
+
+    /**
+     * The mix as normalised floats, for the DSP chain.
+     *
+     * Divided by 32768 rather than 32767 so the scale stays a power of two.
+     * That makes the conversion exact in both directions for every
+     * representable sample, instead of introducing a rounding error on every
+     * sample before the filters have done anything.
+     */
+    fun toFloat(mix: IntArray, out: FloatArray, samples: Int) {
+        var i = 0
+        while (i < samples) {
+            out[i] = mix[i] * (1f / 32768f)
+            i++
+        }
+    }
+
+    /**
+     * Float back to little-endian PCM16: the one conversion at the end of the
+     * chain, and the hard clamp nothing downstream can undo.
+     *
+     * The limiter upstream has no look-ahead, so a sharp transient can still
+     * arrive above full scale for about a millisecond. This is what keeps
+     * that bounded rather than wrapped.
+     */
+    fun clampInto(mix: FloatArray, out: ByteArray, samples: Int) {
+        var i = 0
+        while (i < samples) {
+            var v = (mix[i] * 32768f).toInt()
+            if (v > 32767) v = 32767 else if (v < -32768) v = -32768
+            out[i * 2] = (v and 0xFF).toByte()
+            out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+            i++
+        }
+    }
 }

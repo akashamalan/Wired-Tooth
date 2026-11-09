@@ -3,6 +3,8 @@ package com.wiredtooth.receiver
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import com.wiredtooth.receiver.dsp.EqEngine
+import com.wiredtooth.receiver.dsp.EqSettings
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -108,6 +110,15 @@ class AudioReceiver(
 
     private val rtts = ArrayDeque<Double>()
     private val rttLock = Any()
+
+    /**
+     * The equalizer, on the mixed output.
+     *
+     * It lives here and not in StreamChannel because it is one curve for what
+     * the listener hears, not one per app. Running ten biquads per stream
+     * would also multiply the cost by the stream count for no audible gain.
+     */
+    private val eq = EqEngine()
 
     // One channel per stream id. Each owns its own jitter buffer, drift
     // controller and resampler -- see StreamChannel for why that has to be
@@ -349,6 +360,11 @@ class AudioReceiver(
         channels = ch
         frameBytes = ch * 2
 
+        // A reopen is the one moment where clearing filter memory is correct:
+        // the old signal has already stopped, so there is nothing to click.
+        eq.configure(rate, ch)
+        eq.reset()
+
         val mask = if (ch == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
         val min = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT)
 
@@ -404,6 +420,7 @@ class AudioReceiver(
         var quantumBytes = 0
         var scratch = ByteArray(0)
         var mix = IntArray(0)
+        var mixFloat = FloatArray(0)
         var out = ByteArray(0)
 
         while (running) {
@@ -419,6 +436,7 @@ class AudioReceiver(
                 quantumBytes = needed
                 scratch = ByteArray(needed)
                 mix = IntArray(frames * channels)
+                mixFloat = FloatArray(frames * channels)
                 out = ByteArray(needed)
             }
 
@@ -439,7 +457,19 @@ class AudioReceiver(
                 Mixing.accumulate(scratch, got, gain, mix)
             }
 
-            Mixing.clampInto(mix, out)
+            // One snapshot drives both the decision and the processing, so
+            // they cannot disagree if the user moves a slider mid-block.
+            val eqSettings = eq.snapshot()
+            if (eqSettings.enabled) {
+                val samples = frames * channels
+                Mixing.toFloat(mix, mixFloat, samples)
+                eq.process(eqSettings, mixFloat, frames)
+                Mixing.clampInto(mixFloat, out, samples)
+            } else {
+                // Bypass is the original path, untouched, so off means
+                // bit-identical to having no equalizer in the build at all.
+                Mixing.clampInto(mix, out)
+            }
 
             runCatching { t.write(out, 0, out.size) }
         }
@@ -491,6 +521,9 @@ class AudioReceiver(
     private fun bufferMs(): Double = primary()?.bufferMs() ?: 0.0
 
     // ---- status --------------------------------------------------------
+
+    /** The equalizer, for the UI to read and update. */
+    fun equalizer(): EqEngine = eq
 
     /** Sets one stream's gain. Takes effect on the next 10 ms quantum. */
     fun setVolume(streamId: Int, volume: Float) {
