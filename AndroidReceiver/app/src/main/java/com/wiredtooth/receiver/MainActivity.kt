@@ -1,9 +1,11 @@
 package com.wiredtooth.receiver
 
+import android.app.Activity
 import android.content.Context
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -105,6 +107,24 @@ private fun App(prefilledIp: String?) {
     }
 
     DisposableEffect(Unit) { onDispose { receiver?.stop() } }
+
+    // Back must not be able to stop the music.
+    //
+    // Without this, Back finishes the activity, the composition leaves, the
+    // DisposableEffect above fires and the stream dies -- silently, with no
+    // confirmation, from the gesture people use to glance at something else.
+    // Backgrounding the task instead leaves the activity alive, so playback
+    // continues and Disconnect stays the only way to stop it.
+    //
+    // Enabled whenever a stream is live rather than only on the Now Playing
+    // tab: the tab you happen to be looking at is not a reason to lose your
+    // audio, and the Connect and Saved tabs are reachable mid-stream. With
+    // nothing playing there is nothing to protect, so Back behaves normally
+    // everywhere.
+    val activity = context as? Activity
+    BackHandler(enabled = receiver != null) {
+        activity?.moveTaskToBack(true)
+    }
 
     LaunchedEffect(prefilledIp) { if (prefilledIp != null) connect(prefilledIp) }
 
