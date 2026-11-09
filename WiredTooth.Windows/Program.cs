@@ -63,7 +63,7 @@ public static class Program
         if (!AttachConsole(AttachParentProcess))
             AllocConsole();
 
-        Console.WriteLine("=== WIRED TOOTH - SENDER (--console) ===");
+        Console.WriteLine($"=== {Brand.Name.ToUpperInvariant()} - SENDER (--console) ===");
         Console.WriteLine("Play audio on your laptop.");
         Console.WriteLine("Press ENTER to stop streaming.");
         Console.WriteLine();
