@@ -79,7 +79,7 @@ fun ConnectScreen(
             .padding(horizontal = Space.s3)
             .padding(top = Space.s6, bottom = Space.s4),
     ) {
-        WtText("Wired Tooth", Type.title, p.textPrimary)
+        WtText("Luma", Type.title, p.textPrimary)
         Spacer(Modifier.height(Space.s1))
         WtText(
             "Play your computer's audio through this phone.",
@@ -181,7 +181,7 @@ private fun ScanControl(state: ScanState, onFindPc: () -> Unit) {
                 label = if (state is ScanState.Idle) "Find PC" else "Search again",
                 onClick = onFindPc,
                 spokenLabel = "Find PC. Searches this Wi-Fi network for computers " +
-                    "running Wired Tooth.",
+                    "running Luma.",
             )
         }
     }
@@ -315,7 +315,7 @@ private fun EmptyState() {
         WtText("No PCs found", Type.heading, p.textPrimary, align = TextAlign.Center)
         Spacer(Modifier.height(Space.s1))
         WtText(
-            "Make sure Wired Tooth is running on your computer.",
+            "Make sure Luma is running on your computer.",
             Type.subhead,
             p.textSecondary,
             align = TextAlign.Center,

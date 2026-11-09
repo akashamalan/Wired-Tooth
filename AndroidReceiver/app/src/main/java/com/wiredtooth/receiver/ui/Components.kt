@@ -39,6 +39,17 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import kotlin.math.roundToInt
+
 
 /*
  * COMPONENT SPECS
@@ -364,4 +375,111 @@ fun SectionHeader(text: String, modifier: Modifier = Modifier) {
         color = p.textTertiary,
         modifier = modifier.padding(bottom = Space.s1),
     )
+}
+
+// ------------------------------------------------------------ volume slider
+
+/**
+ * VOLUME SLIDER
+ *   track 4dp, knob 20dp, row min-height 44dp
+ *
+ * Built on foundation rather than Material's Slider, for the same reason
+ * nothing else here is Material: its knob, ripple and colour semantics would
+ * have to be fought rather than configured.
+ *
+ * The knob tracks the finger 1:1 for the whole gesture and commits
+ * continuously, not on release -- a volume control that only applies when you
+ * let go is a control you cannot hear yourself adjusting. Tapping anywhere on
+ * the track jumps there, because on a 4dp line the knob is not the target, the
+ * track is.
+ *
+ * The whole row carries one spoken label with a percentage, and exposes
+ * adjust actions, because dragging a slider is not something a screen reader
+ * user can do.
+ */
+@Composable
+fun VolumeSlider(
+    value: Float,
+    onChange: (Float) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+) {
+    val p = LocalPalette.current
+    val density = LocalDensity.current
+    var width by remember { mutableFloatStateOf(0f) }
+    var dragging by remember { mutableStateOf(false) }
+
+    val knob = 20.dp
+    val knobPx = with(density) { knob.toPx() }
+
+    // The knob's centre must stay inside the track, so the usable travel is
+    // the width minus one knob. Without this the ends clip and 100% sits
+    // half off the edge.
+    fun fractionFor(x: Float): Float {
+        val travel = (width - knobPx).coerceAtLeast(1f)
+        return ((x - knobPx / 2f) / travel).coerceIn(0f, 1f)
+    }
+
+    val spoken = "$label volume, ${(value * 100).roundToInt()} percent"
+
+    Box(
+        modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = 44.dp)
+            .onSizeChanged { width = it.width.toFloat() }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragStart = { offset ->
+                        dragging = true
+                        onChange(fractionFor(offset.x))
+                    },
+                    onDragEnd = { dragging = false },
+                    onDragCancel = { dragging = false },
+                ) { change, _ ->
+                    onChange(fractionFor(change.position.x))
+                }
+            }
+            .pointerInput(Unit) {
+                detectTapGestures { offset -> onChange(fractionFor(offset.x)) }
+            }
+            .semantics {
+                contentDescription = spoken
+                customActions = listOf(
+                    CustomAccessibilityAction("Louder") {
+                        onChange((value + 0.1f).coerceAtMost(1f)); true
+                    },
+                    CustomAccessibilityAction("Quieter") {
+                        onChange((value - 0.1f).coerceAtLeast(0f)); true
+                    },
+                )
+            },
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(p.surfaceRaised),
+        )
+
+        val travelDp = with(density) { (width - knobPx).coerceAtLeast(0f).toDp() }
+
+        Box(
+            Modifier
+                .width(travelDp * value + knob / 2)
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(if (value > 0f) p.accent else p.surfaceRaised),
+        )
+
+        Box(
+            Modifier
+                .offset(x = travelDp * value)
+                .size(knob)
+                .clip(CircleShape)
+                .background(p.textPrimary)
+                .alpha(if (dragging) 0.85f else 1f),
+        )
+    }
 }

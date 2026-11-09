@@ -6,11 +6,12 @@ using WiredTooth.Sender;
 namespace WiredTooth.Windows;
 
 /// <summary>
-/// The tray icon and its menu. Owns the AudioSender and both windows.
+/// The tray icon and its menu. Owns the AudioSender and the windows.
 ///
-/// There is no main window on purpose: this is a background utility, and a
-/// WPF Window that exists only to be hidden shows up in Alt-Tab and on the
-/// taskbar, which is not what a tray app should do.
+/// The tray is no longer the whole interface. It is the app's background
+/// presence -- streaming has to survive the window being closed -- while
+/// MainWindow is what the user actually deals with. Closing the window hides
+/// it here; Exit on this menu is the only thing that quits.
 /// </summary>
 public sealed class TrayApp : IDisposable
 {
@@ -21,8 +22,8 @@ public sealed class TrayApp : IDisposable
     private readonly List<string> _log = [];
     private readonly Lock _logGate = new();
 
-    private StatusWindow? _status;
-    private QrWindow? _qr;
+    private MainWindow? _main;
+    private readonly LocalMute _mute = new();
     private readonly Icon _idleIcon;
     private readonly Icon _activeIcon;
     private bool _wasStreaming;
@@ -47,8 +48,7 @@ public sealed class TrayApp : IDisposable
         _startStop = new ToolStripMenuItem("Stop streaming", null, (_, _) => ToggleStartStop());
 
         var menu = new ContextMenuStrip();
-        menu.Items.Add(new ToolStripMenuItem("Show Status", null, (_, _) => ShowStatus()));
-        menu.Items.Add(new ToolStripMenuItem("Show QR Code", null, (_, _) => ShowQr()));
+        menu.Items.Add(new ToolStripMenuItem($"Open {Brand.Name}", null, (_, _) => ShowMain()));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_startStop);
         menu.Items.Add(new ToolStripSeparator());
@@ -57,13 +57,29 @@ public sealed class TrayApp : IDisposable
         _icon = new NotifyIcon
         {
             Icon = _idleIcon,
-            Text = "Wired Tooth - idle",
+            Text = $"{Brand.Name} - idle",
             Visible = true,
             ContextMenuStrip = menu,
         };
-        _icon.DoubleClick += (_, _) => ShowStatus();
+        _icon.DoubleClick += (_, _) => ShowMain();
 
         _sender.Start();
+
+        // First run gets the introduction; every run after it goes straight to
+        // the home screen. A background utility that starts with no visible
+        // sign of itself leaves the user hunting the tray to find out whether
+        // anything happened, and the first run is exactly when they need both
+        // the explanation and the pairing code.
+        if (Prefs.ShowWelcome)
+        {
+            var welcome = new WelcomeWindow();
+            welcome.Finished += ShowMain;
+            welcome.Show();
+        }
+        else
+        {
+            ShowMain();
+        }
 
         // One timer drives the icon state, the tooltip and both windows. A
         // second-resolution poll is far cheaper than pushing events onto the UI
@@ -91,15 +107,15 @@ public sealed class TrayApp : IDisposable
         }
 
         _icon.Text = !s.Running
-            ? "Wired Tooth - stopped"
+            ? $"{Brand.Name} - stopped"
             : streaming
-                ? Truncate($"Wired Tooth - streaming to {s.Clients.Count} client(s), " +
+                ? Truncate($"{Brand.Name} - streaming to {s.Clients.Count} listener(s), " +
                            $"{s.BitrateKbps:F0} kbit/s")
-                : "Wired Tooth - idle, waiting for a client";
+                : $"{Brand.Name} - idle, waiting for a phone";
 
         _startStop.Text = s.Running ? "Stop streaming" : "Start streaming";
 
-        _status?.Update(s, LogLines());
+        _main?.Refresh(s, LogLines());
     }
 
     // NotifyIcon.Text throws above 63 characters rather than truncating.
@@ -113,31 +129,29 @@ public sealed class TrayApp : IDisposable
         Refresh();
     }
 
-    private void ShowStatus()
+    private void ShowMain()
     {
-        if (_status is null || !_status.IsLoaded)
-        {
-            _status = new StatusWindow();
-            _status.Closed += (_, _) => _status = null;
-        }
-        _status.Update(_sender.GetStatus(), LogLines());
-        _status.Show();
-        _status.Activate();
+        // The window is hidden, never closed, so it keeps its scroll position
+        // and the address the user picked. Re-creating it each time would
+        // silently reset both.
+        _main ??= new MainWindow(_sender, LogLines, _mute);
+        _main.Refresh(_sender.GetStatus(), LogLines());
+        _main.Show();
+        if (_main.WindowState == System.Windows.WindowState.Minimized)
+            _main.WindowState = System.Windows.WindowState.Normal;
+        _main.Activate();
     }
 
-    private void ShowQr()
-    {
-        if (_qr is null || !_qr.IsLoaded)
-        {
-            _qr = new QrWindow();
-            _qr.Closed += (_, _) => _qr = null;
-        }
-        _qr.Show();
-        _qr.Activate();
-    }
 
     private void Exit()
     {
+        // The window cancels its own Close to hide instead, so shutting down
+        // has to bypass that or the process would linger.
+        if (_main is not null)
+        {
+            _main.AllowClose = true;
+            _main.Close();
+        }
         Dispose();
         System.Windows.Application.Current.Shutdown();
     }
@@ -174,5 +188,8 @@ public sealed class TrayApp : IDisposable
         _icon.Visible = false;
         _icon.Dispose();
         _sender.Dispose();
+        // Last thing, and unconditional. Leaving a user's speakers muted after
+        // the app is gone would be unforgivable.
+        _mute.Dispose();
     }
 }

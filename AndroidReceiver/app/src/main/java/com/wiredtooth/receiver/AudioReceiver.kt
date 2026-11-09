@@ -9,6 +9,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.util.ArrayDeque
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
@@ -27,6 +28,18 @@ data class ReceiverStatus(
     val bufferMs: Double,
     val correctionRatio: Double,
     val kbitPerSecond: Double,
+    val streams: List<StreamStatus> = emptyList(),
+)
+
+/** One row of the stream list. */
+data class StreamStatus(
+    val id: Int,
+    val volume: Float,
+    val bufferMs: Double,
+    val packetsReceived: Long,
+    val packetsLost: Long,
+    val underruns: Long,
+    val active: Boolean,
 )
 
 /**
@@ -64,9 +77,18 @@ class AudioReceiver(
          * and drop instead. The +/-0.5% clamp is sized to stay inaudible,
          * which makes it far too slow to recover a large transient.
          */
-        private const val RESYNC_THRESHOLD_MS = 150.0
 
         private const val RTT_WINDOW = 20
+
+        /**
+         * How many streams may be mixed at once.
+         *
+         * Each costs one jitter buffer of about 11 kB at the 60 ms setpoint,
+         * so the ceiling is about taste rather than memory: past a handful,
+         * nobody can tell the streams apart by ear anyway. The rewind ring
+         * buffers in step 2 carry their own, much tighter, cap of 3.
+         */
+        const val MAX_ACTIVE_STREAMS = 8
     }
 
     @Volatile private var running = false
@@ -79,9 +101,7 @@ class AudioReceiver(
     private val threads = mutableListOf<Thread>()
 
     private val packetsReceived = AtomicLong()
-    private val packetsLost = AtomicLong()
     private val packetsDropped = AtomicLong()
-    private val underruns = AtomicLong()
     private val bytesReceived = AtomicLong()
     private val controlSeq = AtomicInteger()
     private val lastAudioAt = AtomicLong(System.currentTimeMillis())
@@ -89,27 +109,22 @@ class AudioReceiver(
     private val rtts = ArrayDeque<Double>()
     private val rttLock = Any()
 
-    // Jitter buffer. A plain deque of PCM byte blocks guarded by one lock:
-    // the receive thread appends, the playback thread removes. Exactly the
-    // producer/consumer shape BufferedWaveProvider has on Windows.
-    private val queue = ArrayDeque<ByteArray>()
-    private val queueLock = Any()
-    private var queuedBytes = 0
+    // One channel per stream id. Each owns its own jitter buffer, drift
+    // controller and resampler -- see StreamChannel for why that has to be
+    // per stream rather than shared.
+    //
+    // Concurrent because the receive thread creates entries while the
+    // playback and drift threads iterate. Iteration over a
+    // ConcurrentHashMap's values is weakly consistent, which is exactly
+    // right here: a stream that appears mid-iteration is simply mixed from
+    // the next quantum instead.
+    private val streams = ConcurrentHashMap<Int, StreamChannel>()
 
     private var track: AudioTrack? = null
     private var sampleRate = 0
     private var channels = 0
     private var frameBytes = 0
     private var formatLabel = "waiting"
-
-    private val drift = DriftController(targetBufferMs)
-    private var resampler: LinearResampler? = null
-
-    private var lastSeq = 0L
-    private var haveSeq = false
-    private var lastPayloadFrames = 0
-    private var lastFrame = ShortArray(0)
-    private var resyncing = false
 
     private var lastRateSampleAt = System.currentTimeMillis()
     private var lastRateBytes = 0L
@@ -163,6 +178,7 @@ class AudioReceiver(
         }
         track = null
         connected = false
+        streams.clear()
     }
 
     // ---- control -------------------------------------------------------
@@ -277,117 +293,50 @@ class AudioReceiver(
             // thousands of packets it never had a chance to receive.
             val now = System.currentTimeMillis()
             if (now - lastAudioAt.get() > AUDIO_TIMEOUT_MS) {
-                haveSeq = false
-                resampler?.reset()
+                streams.values.forEach { it.reset() }
             }
             lastAudioAt.set(now)
             everHadAudio = true
 
-            if (track == null || sampleRate != h.sampleRate || channels != h.channels) {
+            // The first stream to arrive fixes the output format. While it is
+            // the only one, a format change reopens the track exactly as
+            // before -- that is the WP5 behaviour and it still has to work.
+            // Once a second stream exists, reopening would tear down audio
+            // that is playing fine, so a mismatched stream is dropped instead.
+            // In practice they always match: the sender converts every
+            // per-process capture to the same PCM16 format before sending.
+            if (track == null) {
                 openTrack(h.sampleRate, h.channels, h.bitsPerSample, h.codec)
                 inShorts = ShortArray(Wtp.MAX_DATAGRAM_SIZE / 2 + 16)
                 outShorts = ShortArray(
                     LinearResampler.maxOutputFrames(Wtp.MAX_DATAGRAM_SIZE / frameBytes + 2) * channels,
                 )
+            } else if (sampleRate != h.sampleRate || channels != h.channels) {
+                if (streams.size <= 1) {
+                    openTrack(h.sampleRate, h.channels, h.bitsPerSample, h.codec)
+                    streams.values.forEach { it.configure(sampleRate, channels) }
+                } else {
+                    packetsDropped.incrementAndGet()
+                    continue
+                }
             }
 
-            // ---- concealment ------------------------------------------
-            if (haveSeq && h.sequence > lastSeq + 1) {
-                val missing = (h.sequence - lastSeq - 1).toInt()
-                packetsLost.addAndGet(missing.toLong())
-                concealGap(missing)
-            }
-            lastSeq = h.sequence
-            haveSeq = true
+            val channel = streams[h.streamId] ?: run {
+                if (streams.size >= MAX_ACTIVE_STREAMS) {
+                    packetsDropped.incrementAndGet()
+                    null
+                } else {
+                    StreamChannel(h.streamId, targetBufferMs)
+                        .also { it.configure(sampleRate, channels) }
+                        .also { streams[h.streamId] = it }
+                }
+            } ?: continue
 
             packetsReceived.incrementAndGet()
             bytesReceived.addAndGet(p.length.toLong())
-
-            if (h.isSilence) {
-                // An empty silence-flagged packet stands for a fixed span of
-                // quiet. Expanding it here is what keeps the buffer fed while
-                // the PC is producing nothing at all.
-                var bytes = sampleRate * frameBytes * Wtp.SILENCE_KEEPALIVE_MS / 1000
-                bytes -= bytes % frameBytes
-                if (bytes > 0) {
-                    enqueue(ByteArray(bytes))
-                    resampler?.reset()
-                }
-                continue
-            }
-            if (h.payloadLength == 0) continue
-
-            // bytes -> shorts, little-endian
-            val frames = h.payloadLength / frameBytes
-            val samples = frames * channels
-            for (i in 0 until samples) {
-                val o = h.payloadOffset + i * 2
-                inShorts[i] = ((buf[o].toInt() and 0xFF) or (buf[o + 1].toInt() shl 8)).toShort()
-            }
-
-            val depth = bufferMs()
-            if (!resyncing && depth > targetBufferMs + RESYNC_THRESHOLD_MS) {
-                resyncing = true
-            } else if (resyncing && depth <= targetBufferMs) {
-                resyncing = false
-            }
-
-            val outFrames = resampler!!.resample(inShorts, frames, drift.ratio, outShorts)
-            if (outFrames > 0 && !resyncing) {
-                val outBytes = ByteArray(outFrames * frameBytes)
-                for (i in 0 until outFrames * channels) {
-                    val v = outShorts[i].toInt()
-                    outBytes[i * 2] = (v and 0xFF).toByte()
-                    outBytes[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
-                }
-                enqueue(outBytes)
-            }
-
-            lastPayloadFrames = frames
-            if (lastFrame.size != channels) lastFrame = ShortArray(channels)
-            for (c in 0 until channels) lastFrame[c] = inShorts[(frames - 1) * channels + c]
+            channel.accept(h, buf, p.length, inShorts, outShorts)
         }
     }
-
-    /**
-     * Fills a loss gap by fading the last received frame out over 5 ms and
-     * then going silent. Letting the buffer simply go short would starve
-     * playback and also mislead the drift controller, which is measuring
-     * depth and cannot see a hole it was never given.
-     */
-    private fun concealGap(missing: Int) {
-        if (lastPayloadFrames <= 0 || channels <= 0) return
-        // Capped: beyond a couple of hundred ms the stream is gone, not
-        // dropping packets, and synthesising seconds of filler just adds
-        // latency to the recovery.
-        val maxFrames = sampleRate / 5
-        val frames = minOf(missing * lastPayloadFrames, maxFrames)
-        if (frames <= 0) return
-
-        val out = ByteArray(frames * frameBytes)
-        val fade = minOf(sampleRate / 200, frames)     // 5 ms
-        for (f in 0 until frames) {
-            val g = if (f < fade) 1f - f.toFloat() / fade else 0f
-            for (c in 0 until channels) {
-                val v = (lastFrame.getOrElse(c) { 0 } * g).toInt()
-                val o = (f * channels + c) * 2
-                out[o] = (v and 0xFF).toByte()
-                out[o + 1] = ((v shr 8) and 0xFF).toByte()
-            }
-        }
-        enqueue(out)
-        resampler?.reset()
-    }
-
-    private fun enqueue(block: ByteArray) {
-        synchronized(queueLock) {
-            queue.addLast(block)
-            queuedBytes += block.size
-            (queueLock as Object).notifyAll()
-        }
-    }
-
-    // ---- audio out -----------------------------------------------------
 
     private fun openTrack(rate: Int, ch: Int, bits: Int, codec: Int) {
         runCatching {
@@ -399,12 +348,6 @@ class AudioReceiver(
         sampleRate = rate
         channels = ch
         frameBytes = ch * 2
-        resampler = LinearResampler(ch)
-        lastFrame = ShortArray(ch)
-        synchronized(queueLock) {
-            queue.clear()
-            queuedBytes = 0
-        }
 
         val mask = if (ch == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
         val min = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT)
@@ -439,34 +382,68 @@ class AudioReceiver(
         formatLabel = "$rate Hz, $ch ch, $bits-bit, codec $codec"
     }
 
+    /**
+     * The mixer. Pulls a fixed 10 ms quantum from every started stream, sums
+     * them with per-stream gain, clamps, and writes one block to AudioTrack.
+     *
+     * A FIXED quantum is the point. The old loop wrote whatever block came off
+     * the queue, which was fine with one producer; with several, blocks arrive
+     * at different sizes and moments and there is no shared grid to add them
+     * on. Asking each stream for the same number of frames creates that grid.
+     *
+     * Silence is written when nothing is available, rather than skipping the
+     * write. AudioTrack in MODE_STREAM blocks until its buffer has room, so
+     * writing every quantum is what paces this loop against the output clock.
+     * Skipping writes would hand pacing to Thread.sleep and let the device
+     * clock and this loop wander apart -- which is the exact failure the drift
+     * controller exists to fix, reintroduced one layer up.
+     */
     private fun playbackLoop() {
-        // Pre-roll: wait until the buffer holds the target depth before
-        // starting, so the control loop begins at its setpoint instead of
-        // having to climb to it.
         while (running && track == null) Thread.sleep(20)
 
-        while (running) {
-            var block: ByteArray? = null
-            synchronized(queueLock) {
-                if (queue.isEmpty()) {
-                    (queueLock as Object).wait(100)
-                } else if (queuedBytes >= preBufferBytes() || everHadAudio) {
-                    block = queue.removeFirst()
-                    queuedBytes -= block!!.size
-                }
-            }
+        var quantumBytes = 0
+        var scratch = ByteArray(0)
+        var mix = IntArray(0)
+        var out = ByteArray(0)
 
-            val b = block
-            if (b == null) {
-                if (everHadAudio && track != null) underruns.incrementAndGet()
+        while (running) {
+            val t = track
+            if (t == null || frameBytes == 0 || sampleRate == 0) {
+                Thread.sleep(10)
                 continue
             }
-            runCatching { track?.write(b, 0, b.size) }
+
+            val frames = maxOf(sampleRate / 100, 1)          // 10 ms
+            val needed = frames * frameBytes
+            if (needed != quantumBytes) {
+                quantumBytes = needed
+                scratch = ByteArray(needed)
+                mix = IntArray(frames * channels)
+                out = ByteArray(needed)
+            }
+
+            // Nothing has pre-rolled yet: do not start the track's clock on
+            // silence, or the first real audio arrives already late.
+            if (streams.values.none { it.started }) {
+                Thread.sleep(5)
+                continue
+            }
+
+            java.util.Arrays.fill(mix, 0)
+
+            for (ch in streams.values) {
+                val got = ch.drain(scratch, quantumBytes)
+                if (got <= 0) continue
+                val gain = ch.volume
+                if (gain <= 0f) continue
+                Mixing.accumulate(scratch, got, gain, mix)
+            }
+
+            Mixing.clampInto(mix, out)
+
+            runCatching { t.write(out, 0, out.size) }
         }
     }
-
-    private fun preBufferBytes(): Int =
-        if (frameBytes == 0) 0 else (sampleRate * frameBytes * targetBufferMs / 1000.0).toInt()
 
     // ---- drift ---------------------------------------------------------
 
@@ -482,7 +459,12 @@ class AudioReceiver(
             reconnecting = lost
             if (lost) connected = false
 
-            if (track != null && frameBytes > 0) drift.update(bufferMs())
+            // Each stream steers its own controller from its own depth. The
+            // algorithm and the 60 ms setpoint are untouched; there are just
+            // several of them now.
+            if (track != null && frameBytes > 0) {
+                for (ch in streams.values) ch.drift.update(ch.bufferMs())
+            }
 
             val now = System.currentTimeMillis()
             val dt = now - lastRateSampleAt
@@ -495,18 +477,36 @@ class AudioReceiver(
         }
     }
 
-    private fun bufferMs(): Double {
-        if (sampleRate == 0 || frameBytes == 0) return 0.0
-        val bytes = synchronized(queueLock) { queuedBytes }
-        return bytes.toDouble() / (sampleRate * frameBytes) * 1000.0
-    }
+    /**
+     * Depth of the PRIMARY stream, not an average.
+     *
+     * Stream 0 is the whole-system mix and the one a single-stream sender
+     * produces, so it is the number that means the same thing it always did.
+     * Averaging several streams would produce a figure that is true of none of
+     * them, and the per-stream depths are available separately.
+     */
+    private fun primary(): StreamChannel? =
+        streams[0] ?: streams.values.firstOrNull()
+
+    private fun bufferMs(): Double = primary()?.bufferMs() ?: 0.0
 
     // ---- status --------------------------------------------------------
 
+    /** Sets one stream's gain. Takes effect on the next 10 ms quantum. */
+    fun setVolume(streamId: Int, volume: Float) {
+        streams[streamId]?.volume = volume.coerceIn(0f, 1f)
+    }
+
+    fun volumeOf(streamId: Int): Float = streams[streamId]?.volume ?: 1f
+
     fun status(): ReceiverStatus {
         val rx = packetsReceived.get()
-        val lost = packetsLost.get()
+        val channels = streams.values.sortedBy { it.id }
+        // Loss is now counted per stream, because a gap in one stream's
+        // sequence says nothing about the others.
+        val lost = channels.sumOf { it.packetsLost }
         val total = rx + lost
+        val now = System.currentTimeMillis()
         return ReceiverStatus(
             state = when {
                 !running -> "stopped"
@@ -520,12 +520,26 @@ class AudioReceiver(
             packetsReceived = rx,
             packetsLost = lost,
             packetsDropped = packetsDropped.get(),
-            underruns = underruns.get(),
+            underruns = channels.sumOf { it.underruns },
             lossPercent = if (total > 0) lost * 100.0 / total else 0.0,
             rttMs = medianRtt(),
             bufferMs = bufferMs(),
-            correctionRatio = drift.ratio,
+            correctionRatio = primary()?.drift?.ratio ?: 1.0,
             kbitPerSecond = kbps,
+            streams = channels.map {
+                StreamStatus(
+                    id = it.id,
+                    volume = it.volume,
+                    bufferMs = it.bufferMs(),
+                    packetsReceived = it.packetsReceived,
+                    packetsLost = it.packetsLost,
+                    underruns = it.underruns,
+                    // Silence keepalives arrive every 100 ms, so a stream that
+                    // has said nothing for a second has genuinely stopped
+                    // rather than merely gone quiet.
+                    active = now - it.lastPacketAtMs < 1000,
+                )
+            },
         )
     }
 }

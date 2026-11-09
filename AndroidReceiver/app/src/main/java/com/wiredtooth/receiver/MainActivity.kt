@@ -124,6 +124,7 @@ private fun App(prefilledIp: String?) {
                     NowPlayingScreen(
                         status = it,
                         route = OutputRoute.unknownDefault,
+                        onVolume = { id, v -> receiver?.setVolume(id, v) },
                         onDisconnect = {
                             receiver?.stop()
                             receiver = null

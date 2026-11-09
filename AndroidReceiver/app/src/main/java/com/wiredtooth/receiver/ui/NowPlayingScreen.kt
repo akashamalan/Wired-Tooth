@@ -31,7 +31,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.width
 import com.wiredtooth.receiver.ReceiverStatus
+import com.wiredtooth.receiver.StreamStatus
 import kotlin.math.roundToInt
 
 /**
@@ -54,6 +56,7 @@ fun NowPlayingScreen(
     status: ReceiverStatus,
     route: OutputRoute,
     onDisconnect: () -> Unit,
+    onVolume: (Int, Float) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     val p = LocalPalette.current
@@ -82,6 +85,13 @@ fun NowPlayingScreen(
                     SectionHeader("Live")
                     StatGrid(status)
                 }
+            }
+
+            // Below the live panel, because it is a control surface rather
+            // than status. Renders nothing at all on a single-stream sender.
+            if (status.streams.size > 1) {
+                Spacer(Modifier.height(Space.s3))
+                StreamList(status.streams, onVolume)
             }
 
             Spacer(Modifier.weight(1f))
@@ -311,6 +321,64 @@ fun ConfirmSheet(
             )
             Spacer(Modifier.height(Space.s1))
             SecondaryButton(label = "Keep playing", onClick = onCancel)
+        }
+    }
+}
+
+/**
+ * STREAMS
+ *
+ * Hidden entirely when there is one stream. A sender that knows nothing about
+ * per-app capture produces exactly one, stream 0, and showing a list of one
+ * row with a volume slider would be asking the user to manage something that
+ * has nothing to manage.
+ *
+ * Names are not available yet: WTP1 carries a stream id and no label, so a row
+ * says "Stream 2" rather than inventing an app name it cannot know. The names
+ * arrive when the sender sends them.
+ */
+@Composable
+fun StreamList(
+    streams: List<StreamStatus>,
+    onVolume: (Int, Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (streams.size <= 1) return
+    val p = LocalPalette.current
+
+    Column(modifier.fillMaxWidth()) {
+        SectionHeader("Apps")
+        streams.forEach { s ->
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(Radius.card))
+                    .background(p.surface)
+                    .padding(Space.s2),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusDot(
+                        colour = if (s.active) p.good else p.textTertiary,
+                        pulsing = false,
+                    )
+                    Spacer(Modifier.width(Space.s1))
+                    WtText(
+                        if (s.id == 0) "Everything" else "Stream ${s.id}",
+                        Type.heading,
+                        p.textPrimary,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    WtText("${(s.volume * 100).roundToInt()}%", Type.caption, p.textSecondary)
+                }
+                Spacer(Modifier.height(Space.half))
+                VolumeSlider(
+                    value = s.volume,
+                    onChange = { onVolume(s.id, it) },
+                    label = if (s.id == 0) "Everything" else "Stream ${s.id}",
+                )
+            }
+            Spacer(Modifier.height(Space.s1))
         }
     }
 }
