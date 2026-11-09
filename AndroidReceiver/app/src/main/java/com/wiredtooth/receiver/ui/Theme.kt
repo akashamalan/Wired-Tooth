@@ -82,8 +82,8 @@ enum class ConnectError {
     /** Plain copy. Says what to do, not what went wrong internally. */
     val detail: String
         get() = when (this) {
-            Refused -> "Wired Tooth reached the PC but nothing answered. " +
-                "Start Wired Tooth on the computer, then try again."
+            Refused -> "Luma reached the PC but nothing answered. " +
+                "Start Luma on the computer, then try again."
             WrongNetwork -> "This phone and the PC aren't on the same Wi-Fi. " +
                 "Join the same network, or use the PC's hotspot."
             Timeout -> "The PC didn't reply. A firewall may be blocking it, " +
