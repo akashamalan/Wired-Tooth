@@ -216,4 +216,199 @@ class WtpPacketTest {
             last = now
         }
     }
+
+    // ---- streamId, flags bits 1-7 -------------------------------------
+
+    /**
+     * The spec's own example has flags = 0, so it must read as stream 0. This
+     * is the whole backward-compatibility story in one assertion: every packet
+     * an older sender ever produced lands on stream 0 without negotiation.
+     */
+    @Test
+    fun oldSenderPacketsReadAsStreamZero() {
+        val h = Wtp.parse(workedExample(), 44)
+        assertNotNull(h)
+        assertEquals(0, h!!.streamId)
+        assertFalse(h.isSilence)
+    }
+
+    /** Every id from 0 to 127 must survive a round trip through the flags byte. */
+    @Test
+    fun everyStreamIdRoundTrips() {
+        for (id in 0..Wtp.MAX_STREAM_ID) {
+            val pkt = workedExample()
+            pkt[5] = (id shl Wtp.STREAM_ID_SHIFT).toByte()
+            val h = Wtp.parse(pkt, pkt.size)
+            assertNotNull("stream $id must parse", h)
+            assertEquals("stream $id", id, h!!.streamId)
+            assertFalse("stream $id must not read as silence", h.isSilence)
+        }
+    }
+
+    /**
+     * Silence and stream id share one byte, so the pair has to be decodable
+     * independently. A bug that let the id leak into bit 0 would turn odd
+     * stream numbers into permanent silence.
+     */
+    @Test
+    fun silenceAndStreamIdDoNotCollide() {
+        for (id in 0..Wtp.MAX_STREAM_ID) {
+            val pkt = workedExample()
+            pkt[5] = ((id shl Wtp.STREAM_ID_SHIFT) or Wtp.FLAG_SILENCE).toByte()
+            val h = Wtp.parse(pkt, pkt.size)
+            assertNotNull(h)
+            assertEquals("stream $id with silence set", id, h!!.streamId)
+            assertTrue("silence must survive stream $id", h.isSilence)
+        }
+    }
+
+    /**
+     * Mutation of the flags byte specifically. The existing suite mutates
+     * every byte of a valid packet; this narrows in on the new field and
+     * asserts the two properties that matter: parsing never throws, and a
+     * decoded id is always in range, so it can index a stream table without
+     * a bounds check at every call site.
+     */
+    @Test
+    fun everyFlagsByteValueIsSafe() {
+        for (v in 0..255) {
+            val pkt = workedExample()
+            pkt[5] = v.toByte()
+            val h = try {
+                Wtp.parse(pkt, pkt.size)
+            } catch (e: Throwable) {
+                throw AssertionError("flags=$v threw ${e.javaClass.simpleName}", e)
+            }
+            assertNotNull("flags=$v is structurally valid and must parse", h)
+            val id = h!!.streamId
+            assertTrue("flags=$v gave stream id $id out of range", id in 0..Wtp.MAX_STREAM_ID)
+            assertEquals("flags=$v silence bit", (v and 1) != 0, h.isSilence)
+        }
+    }
+
+    /**
+     * The same exhaustive single-byte mutation the C# parser was verified
+     * against, re-run now that a byte carries a new meaning. Reading a field
+     * that did not exist before must not turn a survivable packet into a
+     * crash.
+     */
+    @Test
+    fun singleByteMutationsNeverThrowWithStreamIdsInPlay() {
+        val base = workedExample()
+        var parsed = 0
+        for (i in base.indices) {
+            for (v in 0..255) {
+                val pkt = base.copyOf()
+                pkt[i] = v.toByte()
+                val h = try {
+                    Wtp.parse(pkt, pkt.size)
+                } catch (e: Throwable) {
+                    throw AssertionError("byte $i = $v threw ${e.javaClass.simpleName}", e)
+                }
+                if (h != null) {
+                    parsed++
+                    assertTrue("byte $i = $v gave stream ${h.streamId}",
+                        h.streamId in 0..Wtp.MAX_STREAM_ID)
+                }
+            }
+        }
+        // Most mutations are legitimately accepted -- a changed payload or
+        // timestamp byte is still a structurally valid packet.
+        assertTrue("expected many survivors, got $parsed", parsed > 1000)
+    }
+
+    // ---- control packets with trailing payload -------------------------
+    //
+    // These exist because Part B wants the sender to ship an app list to the
+    // receiver, and extending HELLO_ACK with a payload is the obvious way to
+    // do it without a new packet type. Whether that is SAFE for the receivers
+    // already in the field had never actually been checked.
+
+    /** A control packet of [type] carrying [payload], with a correct length field. */
+    private fun controlPacket(type: Int, payload: ByteArray, declaredLen: Int = -1): ByteArray {
+        val pkt = ByteArray(Wtp.COMMON_HEADER_SIZE + payload.size)
+        System.arraycopy(Wtp.MAGIC, 0, pkt, 0, 4)
+        pkt[4] = type.toByte()
+        pkt[5] = 0
+        val len = if (declaredLen >= 0) declaredLen else payload.size
+        pkt[6] = (len and 0xFF).toByte()
+        pkt[7] = ((len shr 8) and 0xFF).toByte()
+        pkt[8] = 1
+        System.arraycopy(payload, 0, pkt, Wtp.COMMON_HEADER_SIZE, payload.size)
+        return pkt
+    }
+
+    /**
+     * The answer to "does the receiver ignore a trailing HELLO_ACK payload?"
+     *
+     * Yes -- but only when payloadLen counts it. The parser reads the type and
+     * the length and hands the payload back as an offset the caller is free to
+     * ignore, which is exactly what the control loop does for HELLO_ACK.
+     */
+    @Test
+    fun helloAckWithTrailingPayloadStillParses() {
+        val payload = "app-list".toByteArray()
+        val pkt = controlPacket(Wtp.TYPE_HELLO_ACK, payload)
+
+        val h = Wtp.parse(pkt, pkt.size)
+        assertNotNull("HELLO_ACK with a payload must still parse", h)
+        assertEquals(Wtp.TYPE_HELLO_ACK, h!!.type)
+        assertEquals(payload.size, h.payloadLength)
+        assertEquals("payload starts after the 20-byte common header",
+            Wtp.COMMON_HEADER_SIZE, h.payloadOffset)
+    }
+
+    /** Payload size is irrelevant to the receiver, so a large one must be fine too. */
+    @Test
+    fun helloAckPayloadMayBeLarge() {
+        for (n in intArrayOf(1, 64, 512, Wtp.MAX_DATAGRAM_SIZE - Wtp.COMMON_HEADER_SIZE)) {
+            val pkt = controlPacket(Wtp.TYPE_HELLO_ACK, ByteArray(n) { it.toByte() })
+            val h = Wtp.parse(pkt, pkt.size)
+            assertNotNull("HELLO_ACK with $n payload bytes must parse", h)
+            assertEquals(n, h!!.payloadLength)
+        }
+    }
+
+    /**
+     * THE TRAP, and the reason this needed checking.
+     *
+     * Appending bytes while leaving payloadLen at 0 does not degrade
+     * gracefully -- the length check rejects the packet outright, the control
+     * loop drops it with `?: continue`, and the receiver simply never becomes
+     * connected. Silently, with no error anywhere. A sender that extends
+     * HELLO_ACK MUST update payloadLen.
+     */
+    @Test
+    fun helloAckWithUndeclaredPayloadIsRejected() {
+        val pkt = controlPacket(Wtp.TYPE_HELLO_ACK, "app-list".toByteArray(), declaredLen = 0)
+        assertNull("undeclared trailing bytes must be rejected, not half-read",
+            Wtp.parse(pkt, pkt.size))
+    }
+
+    /** An over-declared length is truncation or forgery and must be rejected. */
+    @Test
+    fun helloAckWithOverDeclaredLengthIsRejected() {
+        val pkt = controlPacket(Wtp.TYPE_HELLO_ACK, ByteArray(4), declaredLen = 99)
+        assertNull(Wtp.parse(pkt, pkt.size))
+    }
+
+    /**
+     * The other Part B option: a brand new control packet type.
+     *
+     * Every type value beyond BYE is rejected by existing receivers, and
+     * rejection here means "dropped", not "crashed". That makes adding a type
+     * safe by construction for anything already in the field.
+     */
+    @Test
+    fun unknownControlTypesAreDroppedNotFatal() {
+        for (type in 7..255) {
+            val pkt = controlPacket(type, ByteArray(8))
+            val h = try {
+                Wtp.parse(pkt, pkt.size)
+            } catch (e: Throwable) {
+                throw AssertionError("type $type threw ${e.javaClass.simpleName}", e)
+            }
+            assertNull("type $type is unknown and must be dropped", h)
+        }
+    }
 }
