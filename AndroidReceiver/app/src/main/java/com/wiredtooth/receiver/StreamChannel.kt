@@ -337,13 +337,15 @@ object Mixing {
      * failure here: wrapping would turn a loud passage into a full-scale
      * click, which is both louder and capable of damaging hearing.
      */
-    fun clampInto(mix: IntArray, out: ByteArray) {
+    fun clampInto(mix: IntArray, out: ByteArray): Int {
+        var clamped = 0
         for (i in mix.indices) {
             var v = mix[i]
-            if (v > 32767) v = 32767 else if (v < -32768) v = -32768
+            if (v > 32767) { v = 32767; clamped++ } else if (v < -32768) { v = -32768; clamped++ }
             out[i * 2] = (v and 0xFF).toByte()
             out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
         }
+        return clamped
     }
 
     /**
@@ -369,15 +371,22 @@ object Mixing {
      * The limiter upstream has no look-ahead, so a sharp transient can still
      * arrive above full scale for about a millisecond. This is what keeps
      * that bounded rather than wrapped.
+     *
+     * Returns how many samples it had to clamp. On a correctly set up chain
+     * that should be rare, so the count is worth watching: a rising number
+     * means the preamp and the limiter are not holding and the listener is
+     * hearing clipping.
      */
-    fun clampInto(mix: FloatArray, out: ByteArray, samples: Int) {
+    fun clampInto(mix: FloatArray, out: ByteArray, samples: Int): Int {
+        var clamped = 0
         var i = 0
         while (i < samples) {
             var v = (mix[i] * 32768f).toInt()
-            if (v > 32767) v = 32767 else if (v < -32768) v = -32768
+            if (v > 32767) { v = 32767; clamped++ } else if (v < -32768) { v = -32768; clamped++ }
             out[i * 2] = (v and 0xFF).toByte()
             out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
             i++
         }
+        return clamped
     }
 }

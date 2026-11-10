@@ -26,16 +26,49 @@ data class EqSettings(
     /**
      * Subtract the largest boost in the curve before filtering.
      *
-     * This is what stops "turn the bass up" from turning into distortion. It
-     * is NOT a guarantee on its own: two overlapping bands at +12 dB sum to
-     * more than +12 dB at the frequency between them, and this only subtracts
-     * the largest single band. The limiter covers the remainder.
+     * This is what stops "turn the bass up" from turning into distortion.
+     * The amount comes from [preampDb], which measures the real peak of the
+     * combined curve rather than assuming the largest single band is the
+     * highest point. Overlapping bands sum, so that assumption was wrong by
+     * however much the neighbours contributed.
+     *
+     * Still not a guarantee on its own. It flattens the steady-state peak;
+     * a transient can briefly exceed it, which is what the limiter and then
+     * the hard clamp are for.
      */
     val autoPreamp: Boolean = true,
     val limiter: Boolean = true,
     val bands: List<EqBand> = defaultBands(),
+    /**
+     * The rate the preamp is computed against.
+     *
+     * The response of a digital filter depends on the sample rate, so the
+     * true peak does too. In practice the sender is always 48 kHz, but the
+     * receiver takes the rate from the stream, so the caller passes whatever
+     * is actually open and this stops being an assumption.
+     */
+    val sampleRateForPreamp: Int = 48000,
 ) {
-    /** The largest boost in the curve, in dB. Cuts do not count. */
+    /**
+     * How far to pull the signal down before filtering, in dB. Never a boost.
+     *
+     * Computed here, at construction, which is the whole point: constructing
+     * settings happens on the UI thread when somebody moves a slider, and
+     * the audio thread then reads one number out of an immutable object. A
+     * few thousand sines and cosines are free in the first place and
+     * impossible in the second.
+     */
+    val preampDb: Float =
+        if (autoPreamp) FrequencyResponse.preampDb(bands, sampleRateForPreamp) else 0f
+
+    /**
+     * The largest single boost in the curve.
+     *
+     * No longer what drives the preamp -- it under-corrects whenever bands
+     * overlap, which at one-octave spacing is most of the time. Kept because
+     * the difference between this and [preampDb] is exactly the error the
+     * true-peak scan exists to remove, and the tests assert on it.
+     */
     fun maxBoostDb(): Float {
         var m = 0f
         for (b in bands) if (b.gainDb > m) m = b.gainDb

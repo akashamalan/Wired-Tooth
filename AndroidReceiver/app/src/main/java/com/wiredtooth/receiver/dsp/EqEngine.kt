@@ -214,7 +214,8 @@ class EqEngine {
             b++
         }
 
-        val targetPreampDb = if (s.autoPreamp) -s.maxBoostDb().toDouble() else 0.0
+        // Already measured off the audio thread; this only glides towards it.
+        val targetPreampDb = if (s.autoPreamp) s.preampDb.toDouble() else 0.0
         curPreampDb = approach(curPreampDb, targetPreampDb, maxGainStep)
         preampGain = 10.0.pow(curPreampDb / 20.0)
 

@@ -31,6 +31,15 @@ data class ReceiverStatus(
     val correctionRatio: Double,
     val kbitPerSecond: Double,
     val streams: List<StreamStatus> = emptyList(),
+    /**
+     * Samples the final hard clamp had to saturate since connecting.
+     *
+     * Should stay near zero. A rising count means the preamp and the limiter
+     * are not holding the signal and the listener is hearing clipping.
+     */
+    val clampedSamples: Long = 0,
+    /** Auto-preamp currently applied, in dB. Zero or negative. */
+    val headroomDb: Float = 0f,
 )
 
 /** One row of the stream list. */
@@ -119,6 +128,9 @@ class AudioReceiver(
      * would also multiply the cost by the stream count for no audible gain.
      */
     private val eq = EqEngine()
+
+    /** Counts how often the last line of defence actually fired. */
+    private val clampedSamples = AtomicLong()
 
     // One channel per stream id. Each owns its own jitter buffer, drift
     // controller and resampler -- see StreamChannel for why that has to be
@@ -460,7 +472,7 @@ class AudioReceiver(
             // One snapshot drives both the decision and the processing, so
             // they cannot disagree if the user moves a slider mid-block.
             val eqSettings = eq.snapshot()
-            if (eqSettings.enabled) {
+            val clamped = if (eqSettings.enabled) {
                 val samples = frames * channels
                 Mixing.toFloat(mix, mixFloat, samples)
                 eq.process(eqSettings, mixFloat, frames)
@@ -470,6 +482,7 @@ class AudioReceiver(
                 // bit-identical to having no equalizer in the build at all.
                 Mixing.clampInto(mix, out)
             }
+            if (clamped > 0) clampedSamples.addAndGet(clamped.toLong())
 
             runCatching { t.write(out, 0, out.size) }
         }
@@ -558,6 +571,8 @@ class AudioReceiver(
             rttMs = medianRtt(),
             bufferMs = bufferMs(),
             correctionRatio = primary()?.drift?.ratio ?: 1.0,
+            clampedSamples = clampedSamples.get(),
+            headroomDb = eq.snapshot().let { if (it.enabled && it.autoPreamp) it.preampDb else 0f },
             kbitPerSecond = kbps,
             streams = channels.map {
                 StreamStatus(
