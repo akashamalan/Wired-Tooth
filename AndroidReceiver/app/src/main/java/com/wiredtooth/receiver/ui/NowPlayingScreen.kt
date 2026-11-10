@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.width
 import com.wiredtooth.receiver.ReceiverStatus
 import com.wiredtooth.receiver.StreamStatus
+import com.wiredtooth.receiver.dsp.SoundState
 import kotlin.math.roundToInt
 
 /**
@@ -57,10 +59,14 @@ fun NowPlayingScreen(
     route: OutputRoute,
     onDisconnect: () -> Unit,
     onVolume: (Int, Float) -> Unit = { _, _ -> },
+    sound: SoundState = SoundState(),
+    onSound: (SoundState) -> Unit = {},
+    onCompare: (active: Boolean, showEqualized: Boolean) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     val p = LocalPalette.current
     var confirming by remember { mutableStateOf(false) }
+    var soundOpen by remember { mutableStateOf(false) }
 
     Box(modifier.fillMaxSize()) {
         Column(
@@ -94,6 +100,18 @@ fun NowPlayingScreen(
                 StreamList(status.streams, onVolume)
             }
 
+            Spacer(Modifier.height(Space.s3))
+
+            // The entry point into Sound. A row rather than a gear, because
+            // this is the only setting on this screen and hiding the only
+            // setting behind an icon costs a tap and a guess.
+            NavRow(
+                label = "Sound",
+                value = summarise(sound),
+                onClick = { soundOpen = true },
+                spokenLabel = summariseSpoken(sound),
+            )
+
             Spacer(Modifier.weight(1f))
 
             SecondaryButton(
@@ -101,6 +119,18 @@ fun NowPlayingScreen(
                 onClick = { confirming = true },
                 destructive = true,
                 spokenLabel = "Disconnect from ${status.senderIp.replace(".", " dot ")}",
+            )
+        }
+
+        // One sheet at a time. Disconnect wins, because it is the one the
+        // user reached for most recently in every path that can show both.
+        if (soundOpen && !confirming) {
+            SoundSheet(
+                state = sound,
+                status = status,
+                onChange = onSound,
+                onDismiss = { soundOpen = false },
+                onCompare = onCompare,
             )
         }
 
@@ -289,7 +319,7 @@ fun ConfirmSheet(
     Box(
         Modifier
             .fillMaxSize()
-            .alpha(progress)
+            .alpha(progress.coerceIn(0f, 1f))
             .background(Color.Black.copy(alpha = 0.45f))
             .pointerInput(Unit) { detectTapGestures { onCancel() } }
             .semantics { contentDescription = "Dismiss" },
@@ -301,8 +331,18 @@ fun ConfirmSheet(
                 .fillMaxWidth()
                 .then(
                     // Enters upward, leaves downward: the same path, mirrored.
-                    if (a11y.reduceMotion) Modifier.alpha(progress)
-                    else Modifier.padding(top = ((1f - progress) * 40).dp).alpha(progress),
+                    //
+                    // offset, NOT padding. motionMomentum is a low-bouncy
+                    // spring, so progress overshoots past 1.0 on the way in --
+                    // which is the entire point of using it for a sheet. A
+                    // negative padding throws ("Padding must be non-negative")
+                    // and takes the app down the moment the sheet opens; an
+                    // offset renders the overshoot as the slight over-travel
+                    // it is meant to be. Alpha is clamped for the same reason.
+                    if (a11y.reduceMotion) Modifier.alpha(progress.coerceIn(0f, 1f))
+                    else Modifier
+                        .offset(y = ((1f - progress) * 40).dp)
+                        .alpha(progress.coerceIn(0f, 1f)),
                 )
                 .clip(RoundedCornerShape(topStart = Radius.sheet, topEnd = Radius.sheet))
                 .background(p.surfaceRaised)

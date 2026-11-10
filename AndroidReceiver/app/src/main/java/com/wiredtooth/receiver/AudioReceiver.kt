@@ -3,6 +3,10 @@ package com.wiredtooth.receiver
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import com.wiredtooth.receiver.dsp.CompareFader
+import com.wiredtooth.receiver.dsp.EqEngine
+import com.wiredtooth.receiver.dsp.EqSettings
+import com.wiredtooth.receiver.dsp.SoundState
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -29,6 +33,49 @@ data class ReceiverStatus(
     val correctionRatio: Double,
     val kbitPerSecond: Double,
     val streams: List<StreamStatus> = emptyList(),
+    /**
+     * Samples the final hard clamp had to saturate since connecting.
+     *
+     * Should stay near zero. A rising count means the preamp and the limiter
+     * are not holding the signal and the listener is hearing clipping.
+     */
+    val clampedSamples: Long = 0,
+    /** Auto-preamp currently applied, in dB. Zero or negative. */
+    val headroomDb: Float = 0f,
+    /**
+     * The open output rate, or 0 before the first packet.
+     *
+     * Exposed because the UI needs it to show a headroom figure that matches
+     * the one applied: the preamp is derived from the filter response, and the
+     * response depends on the rate. Recomputing in the UI against the same
+     * rate is what lets the number track a slider immediately instead of
+     * waiting for the next status poll.
+     */
+    val sampleRate: Int = 0,
+    /** Filter-state resets forced by a non-finite sample. Should stay 0. */
+    val eqResets: Long = 0,
+    /**
+     * Cost of the mix-to-bytes stage per 10 ms quantum, in nanoseconds, split
+     * by whether the equalizer was running.
+     *
+     * The pair is the point: the difference between them is what the
+     * equalizer actually costs, and each on its own says little. Worst matters
+     * more than average, because one quantum slower than the quantum itself is
+     * a late write to AudioTrack, which is a dropout.
+     */
+    val eqOnAvgNanos: Long = 0,
+    val eqOnWorstNanos: Long = 0,
+    val eqOnQuanta: Long = 0,
+    /**
+     * The first EQ quantum since the timers were last cleared.
+     *
+     * The one the user hears when they switch Sound on, and the reason
+     * [EqWarmup] exists.
+     */
+    val eqOnFirstNanos: Long = 0,
+    val eqOffAvgNanos: Long = 0,
+    val eqOffWorstNanos: Long = 0,
+    val eqOffQuanta: Long = 0,
 )
 
 /** One row of the stream list. */
@@ -108,6 +155,58 @@ class AudioReceiver(
 
     private val rtts = ArrayDeque<Double>()
     private val rttLock = Any()
+
+    /**
+     * The equalizer, on the mixed output.
+     *
+     * It lives here and not in StreamChannel because it is one curve for what
+     * the listener hears, not one per app. Running ten biquads per stream
+     * would also multiply the cost by the stream count for no audible gain.
+     */
+    private val eq = EqEngine()
+
+    /**
+     * The user's choice, kept so it can be re-derived on a format change.
+     *
+     * Volatile rather than atomic: it is written by whoever moved the slider
+     * and read by the receive thread on a reopen, and a torn read is not
+     * possible for a reference. The thing the audio thread reads is the
+     * EqSettings snapshot inside [eq], not this.
+     */
+    @Volatile
+    private var sound = SoundState()
+
+    /**
+     * Per-quantum cost of turning the mix into bytes, with and without the
+     * equalizer.
+     *
+     * Kept as two separate accumulators rather than one, because the useful
+     * figure is the difference: the bypass number is what this loop costs with
+     * no equalizer in the path at all, so subtracting it from the on number is
+     * the real price of the feature and nothing else.
+     */
+    private val eqOnNanos = NanoStats()
+    private val eqOffNanos = NanoStats()
+
+    /**
+     * Compare mode: the A/B button in the Sound sheet.
+     *
+     * [compareRequested] is what the UI asked for. The PATH stays engaged
+     * past the moment the request drops, until the fader has arrived back at
+     * the equalized side, because that is the only point where handing back
+     * to the ordinary path is silent -- there the fader outputs the filtered
+     * signal unaltered, so the two paths produce identical bytes.
+     */
+    private val fader = CompareFader()
+
+    @Volatile
+    private var compareRequested = false
+
+    @Volatile
+    private var compareEngaged = false
+
+    /** Counts how often the last line of defence actually fired. */
+    private val clampedSamples = AtomicLong()
 
     // One channel per stream id. Each owns its own jitter buffer, drift
     // controller and resampler -- see StreamChannel for why that has to be
@@ -349,6 +448,21 @@ class AudioReceiver(
         channels = ch
         frameBytes = ch * 2
 
+        // A reopen is the one moment where clearing filter memory is correct:
+        // the old signal has already stopped, so there is nothing to click.
+        eq.configure(rate, ch)
+        eq.reset()
+
+        // Rebuild the curve against the new rate. The preamp is the negative
+        // of the true peak of the response, and a filter's response depends on
+        // the sample rate, so a format change invalidates a figure computed
+        // for the old rate -- silently, and in the direction of too little
+        // headroom. Recomputing here is also what keeps the number shown in
+        // the UI equal to the gain actually applied.
+        fader.configure(rate)
+        fader.snapToEqualized()
+        pushSound()
+
         val mask = if (ch == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
         val min = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT)
 
@@ -404,6 +518,8 @@ class AudioReceiver(
         var quantumBytes = 0
         var scratch = ByteArray(0)
         var mix = IntArray(0)
+        var mixFloat = FloatArray(0)
+        var dryFloat = FloatArray(0)
         var out = ByteArray(0)
 
         while (running) {
@@ -419,6 +535,8 @@ class AudioReceiver(
                 quantumBytes = needed
                 scratch = ByteArray(needed)
                 mix = IntArray(frames * channels)
+                mixFloat = FloatArray(frames * channels)
+                dryFloat = FloatArray(frames * channels)
                 out = ByteArray(needed)
             }
 
@@ -439,7 +557,52 @@ class AudioReceiver(
                 Mixing.accumulate(scratch, got, gain, mix)
             }
 
-            Mixing.clampInto(mix, out)
+            // One snapshot drives both the decision and the processing, so
+            // they cannot disagree if the user moves a slider mid-block.
+            val eqSettings = eq.snapshot()
+
+            // Timed on both sides of the branch, into separate accumulators,
+            // because the question is not "how long does the equalizer take"
+            // but "how much longer than not having it". Timing only the on
+            // path would give a number with nothing to compare it against.
+            // Compare stays engaged until the fader is home, so the handover
+            // back to the ordinary path happens at the one instant the two
+            // produce identical output.
+            if (compareRequested && eqSettings.enabled) {
+                compareEngaged = true
+            } else if (compareEngaged && fader.atRest()) {
+                compareEngaged = false
+            }
+
+            val startNanos = System.nanoTime()
+            val clamped = if (compareEngaged && eqSettings.enabled) {
+                val samples = frames * channels
+                Mixing.toFloat(mix, dryFloat, samples)
+                // ONE engine and ONE scratch copy, not two engines. The
+                // equalizer runs on every quantum for as long as Compare is
+                // open, whichever side is audible, so its filter state is
+                // always settled and its code always hot. A toggle then moves
+                // nothing but the blend coefficient -- there is no cold start
+                // to hear, and no IIR refill swelling in behind it.
+                System.arraycopy(dryFloat, 0, mixFloat, 0, samples)
+                eq.process(eqSettings, mixFloat, frames)
+                fader.blend(dryFloat, mixFloat, frames, channels)
+                Mixing.clampInto(mixFloat, out, samples)
+            } else if (eqSettings.enabled) {
+                val samples = frames * channels
+                Mixing.toFloat(mix, mixFloat, samples)
+                eq.process(eqSettings, mixFloat, frames)
+                Mixing.clampInto(mixFloat, out, samples)
+            } else {
+                // Bypass is the original path, untouched, so off means
+                // bit-identical to having no equalizer in the build at all.
+                Mixing.clampInto(mix, out)
+            }
+            val elapsedNanos = System.nanoTime() - startNanos
+            if (eqSettings.enabled) eqOnNanos.record(elapsedNanos)
+            else eqOffNanos.record(elapsedNanos)
+
+            if (clamped > 0) clampedSamples.addAndGet(clamped.toLong())
 
             runCatching { t.write(out, 0, out.size) }
         }
@@ -492,6 +655,62 @@ class AudioReceiver(
 
     // ---- status --------------------------------------------------------
 
+    /** The equalizer, for the UI to read and update. */
+    fun equalizer(): EqEngine = eq
+
+    /**
+     * Applies the user's sound choice.
+     *
+     * The conversion from choice to filter coefficients happens HERE rather
+     * than in the UI, because it needs the sample rate that is actually open
+     * and the UI does not know it -- the rate comes from the stream and can
+     * change mid-session. Keeping the choice and converting on demand means a
+     * format change re-derives the preamp instead of inheriting a stale one.
+     *
+     * Costs a few thousand trig calls, on the caller's thread, which is the UI
+     * thread reacting to a slider or the receive thread handling a format
+     * change. Never the playback thread: that one only ever reads the finished
+     * number out of the immutable snapshot.
+     */
+    fun applySound(s: SoundState) {
+        sound = s
+        pushSound()
+    }
+
+    fun soundState(): SoundState = sound
+
+    /**
+     * Clears the timing accumulators.
+     *
+     * Needed for an honest on-versus-off comparison: the first few quanta
+     * after the output opens include the JIT warming up on code that has
+     * never run, and a worst-case figure that is really a first-run figure
+     * says nothing about steady state.
+     */
+    /**
+     * Opens or closes Compare mode and chooses the audible side.
+     *
+     * The dry trim is read from the live settings rather than taken from the
+     * caller, so the level match can never disagree with the curve that is
+     * actually running.
+     */
+    fun setCompare(active: Boolean, showEqualized: Boolean) {
+        compareRequested = active
+        if (active) fader.request(showEqualized, eq.snapshot().compareDryTrimDb)
+        else fader.release()
+    }
+
+    fun compareActive(): Boolean = compareEngaged
+
+    fun resetTimings() {
+        eqOnNanos.reset()
+        eqOffNanos.reset()
+    }
+
+    private fun pushSound() {
+        eq.apply(sound.toEqSettings(sampleRate))
+    }
+
     /** Sets one stream's gain. Takes effect on the next 10 ms quantum. */
     fun setVolume(streamId: Int, volume: Float) {
         streams[streamId]?.volume = volume.coerceIn(0f, 1f)
@@ -525,6 +744,17 @@ class AudioReceiver(
             rttMs = medianRtt(),
             bufferMs = bufferMs(),
             correctionRatio = primary()?.drift?.ratio ?: 1.0,
+            clampedSamples = clampedSamples.get(),
+            headroomDb = eq.snapshot().let { if (it.enabled && it.autoPreamp) it.preampDb else 0f },
+            sampleRate = sampleRate,
+            eqResets = eq.instabilityResets,
+            eqOnAvgNanos = eqOnNanos.average,
+            eqOnWorstNanos = eqOnNanos.worst,
+            eqOnQuanta = eqOnNanos.samples,
+            eqOnFirstNanos = eqOnNanos.first,
+            eqOffAvgNanos = eqOffNanos.average,
+            eqOffWorstNanos = eqOffNanos.worst,
+            eqOffQuanta = eqOffNanos.samples,
             kbitPerSecond = kbps,
             streams = channels.map {
                 StreamStatus(

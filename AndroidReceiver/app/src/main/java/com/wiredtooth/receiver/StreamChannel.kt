@@ -19,6 +19,11 @@ package com.wiredtooth.receiver
 class StreamChannel(
     val id: Int,
     private val targetBufferMs: Double,
+    /**
+     * Wall clock, injectable so the silence-coverage logic can be tested
+     * without a test that genuinely waits thirty seconds.
+     */
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     /** Per-stream gain, 0.0 to 1.0. Read by the mixer on every quantum. */
     @Volatile var volume: Float = 1f
@@ -64,6 +69,15 @@ class StreamChannel(
     @Volatile var lastPacketAtMs = System.currentTimeMillis()
         private set
 
+    /**
+     * True when the most recent packet was a silence keepalive.
+     *
+     * This is what separates "the sender has nothing to play" from "the
+     * sender had something and it did not arrive". Only the second is a
+     * dropout.
+     */
+    @Volatile private var lastPacketWasSilence = false
+
     fun configure(rate: Int, ch: Int) {
         if (sampleRate == rate && channels == ch && resampler != null) return
         sampleRate = rate
@@ -84,6 +98,7 @@ class StreamChannel(
         haveSeq = false
         resyncing = false
         started = false
+        lastPacketWasSilence = false
     }
 
     fun bufferMs(): Double {
@@ -109,7 +124,8 @@ class StreamChannel(
         inShorts: ShortArray,
         outShorts: ShortArray,
     ) {
-        lastPacketAtMs = System.currentTimeMillis()
+        lastPacketAtMs = clock()
+        lastPacketWasSilence = h.isSilence
 
         // A gap longer than the timeout is a dropped link, not lost packets.
         if (!haveSeq) {
@@ -244,8 +260,35 @@ class StreamChannel(
                 }
             }
         }
-        if (filled < wanted) underruns++
+        if (filled < wanted && !coveredByKeepalive()) underruns++
         return filled
+    }
+
+    /**
+     * Whether a short drain right now is explained by the sender being quiet.
+     *
+     * WASAPI loopback stops delivering entirely when the PC plays nothing, so
+     * the sender substitutes one empty keepalive per SILENCE_KEEPALIVE_MS.
+     * Each stands for that much silence, but they do not arrive on a perfect
+     * grid: the sender's own loop polls on a timer, and Windows timer
+     * granularity alone pushes the cadence past 100 ms. The queue therefore
+     * empties for a few milliseconds near the end of every keepalive period.
+     *
+     * Counting those as dropouts was wrong twice over. It fired about
+     * eighteen times a second on a completely idle PC, which buried any real
+     * dropout in noise, and it was describing silence as a fault when silence
+     * was the correct output: nothing was lost, because there was nothing to
+     * lose.
+     *
+     * The grace window is what keeps this from hiding a genuine stall. The
+     * sender polls every SILENCE_KEEPALIVE_MS / 2, so a keepalive can be up
+     * to about half a period late through timer granularity alone, and
+     * network jitter adds more. Past that, the sender has stopped telling us
+     * it is alive, and a short drain is a real hole again.
+     */
+    private fun coveredByKeepalive(): Boolean {
+        if (!lastPacketWasSilence) return false
+        return clock() - lastPacketAtMs <= Wtp.SILENCE_KEEPALIVE_MS + KEEPALIVE_GRACE_MS
     }
 
     companion object {
@@ -254,6 +297,13 @@ class StreamChannel(
          * it has drained back down. Unchanged from the single-stream receiver.
          */
         const val RESYNC_THRESHOLD_MS = 150.0
+
+        /**
+         * How late a silence keepalive may be before a short drain counts as
+         * a real dropout again. Sized to absorb the sender's polling interval
+         * plus ordinary Wi-Fi jitter, and no more.
+         */
+        const val KEEPALIVE_GRACE_MS = 60L
     }
 }
 
@@ -287,12 +337,56 @@ object Mixing {
      * failure here: wrapping would turn a loud passage into a full-scale
      * click, which is both louder and capable of damaging hearing.
      */
-    fun clampInto(mix: IntArray, out: ByteArray) {
+    fun clampInto(mix: IntArray, out: ByteArray): Int {
+        var clamped = 0
         for (i in mix.indices) {
             var v = mix[i]
-            if (v > 32767) v = 32767 else if (v < -32768) v = -32768
+            if (v > 32767) { v = 32767; clamped++ } else if (v < -32768) { v = -32768; clamped++ }
             out[i * 2] = (v and 0xFF).toByte()
             out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
         }
+        return clamped
+    }
+
+    /**
+     * The mix as normalised floats, for the DSP chain.
+     *
+     * Divided by 32768 rather than 32767 so the scale stays a power of two.
+     * That makes the conversion exact in both directions for every
+     * representable sample, instead of introducing a rounding error on every
+     * sample before the filters have done anything.
+     */
+    fun toFloat(mix: IntArray, out: FloatArray, samples: Int) {
+        var i = 0
+        while (i < samples) {
+            out[i] = mix[i] * (1f / 32768f)
+            i++
+        }
+    }
+
+    /**
+     * Float back to little-endian PCM16: the one conversion at the end of the
+     * chain, and the hard clamp nothing downstream can undo.
+     *
+     * The limiter upstream has no look-ahead, so a sharp transient can still
+     * arrive above full scale for about a millisecond. This is what keeps
+     * that bounded rather than wrapped.
+     *
+     * Returns how many samples it had to clamp. On a correctly set up chain
+     * that should be rare, so the count is worth watching: a rising number
+     * means the preamp and the limiter are not holding and the listener is
+     * hearing clipping.
+     */
+    fun clampInto(mix: FloatArray, out: ByteArray, samples: Int): Int {
+        var clamped = 0
+        var i = 0
+        while (i < samples) {
+            var v = (mix[i] * 32768f).toInt()
+            if (v > 32767) { v = 32767; clamped++ } else if (v < -32768) { v = -32768; clamped++ }
+            out[i * 2] = (v and 0xFF).toByte()
+            out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+            i++
+        }
+        return clamped
     }
 }

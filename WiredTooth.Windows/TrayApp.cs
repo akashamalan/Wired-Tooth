@@ -31,16 +31,7 @@ public sealed class TrayApp : IDisposable
     public TrayApp(IPAddress? forced)
     {
         _sender = new AudioSender(forced);
-        _sender.Log += line =>
-        {
-            lock (_logGate)
-            {
-                _log.Add($"{DateTime.Now:HH:mm:ss}  {line}");
-                // Bounded: this runs for hours and the log is a diagnostic
-                // panel, not a record.
-                if (_log.Count > 500) _log.RemoveRange(0, _log.Count - 500);
-            }
-        };
+        _sender.Log += AppendLog;
 
         _idleIcon = BuildIcon(Color.FromArgb(120, 120, 120));
         _activeIcon = BuildIcon(Color.FromArgb(64, 190, 120));
@@ -63,7 +54,7 @@ public sealed class TrayApp : IDisposable
         };
         _icon.DoubleClick += (_, _) => ShowMain();
 
-        _sender.Start();
+        StartSender();
 
         // First run gets the introduction; every run after it goes straight to
         // the home screen. A background utility that starts with no visible
@@ -118,6 +109,34 @@ public sealed class TrayApp : IDisposable
         _main?.Refresh(s, LogLines());
     }
 
+    private void AppendLog(string line)
+    {
+        lock (_logGate)
+        {
+            _log.Add($"{DateTime.Now:HH:mm:ss}  {line}");
+            // Bounded: this runs for hours and the log is a diagnostic
+            // panel, not a record.
+            if (_log.Count > 500) _log.RemoveRange(0, _log.Count - 500);
+        }
+    }
+
+    /// <summary>
+    /// Starts the sender, and says so plainly if the port is taken instead of
+    /// taking the process down.
+    /// </summary>
+    private void StartSender()
+    {
+        string? error = SenderStart.Try(_sender);
+        if (error is null) return;
+
+        AppendLog(error);
+        _icon.Text = Truncate($"{Brand.Name} - not streaming");
+        System.Windows.MessageBox.Show(
+            error, Brand.Name,
+            System.Windows.MessageBoxButton.OK,
+            System.Windows.MessageBoxImage.Warning);
+    }
+
     // NotifyIcon.Text throws above 63 characters rather than truncating.
     private static string Truncate(string s) =>
         s.Length <= 63 ? s : s[..60] + "...";
@@ -125,7 +144,7 @@ public sealed class TrayApp : IDisposable
     private void ToggleStartStop()
     {
         if (_sender.IsRunning) _sender.Stop();
-        else _sender.Start();
+        else StartSender();
         Refresh();
     }
 

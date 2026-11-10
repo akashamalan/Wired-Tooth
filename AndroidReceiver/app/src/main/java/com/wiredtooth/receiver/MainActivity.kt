@@ -1,9 +1,11 @@
 package com.wiredtooth.receiver
 
+import android.app.Activity
 import android.content.Context
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -29,6 +31,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.wiredtooth.receiver.dsp.SoundState
 import com.wiredtooth.receiver.ui.ConnectScreen
 import com.wiredtooth.receiver.ui.ConnectError
 import com.wiredtooth.receiver.ui.Device
@@ -60,6 +63,17 @@ class MainActivity : ComponentActivity() {
         // background playback.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        // Compile the equalizer's code before anyone can switch it on.
+        //
+        // On a background thread because it is a second of deliberate DSP
+        // work; on app start because that is the one moment when nothing is
+        // playing and a busy core costs nobody anything. Without it the first
+        // quantum after the user taps Sound is also the first time the runtime
+        // has ever executed the biquad loop, and it ran roughly 140ms against
+        // a 10ms budget -- a dropout at precisely the moment they are
+        // listening for the change.
+        kotlin.concurrent.thread(name = "eq-warmup", isDaemon = true) { EqWarmup.warm() }
+
         val prefilledIp = intent?.data
             ?.takeIf { it.scheme == "wiredtooth" }
             ?.host
@@ -81,9 +95,15 @@ private fun App(prefilledIp: String?) {
     var saved by remember { mutableStateOf(SavedStore.load(context)) }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
 
+    // Loaded once, before any receiver exists, so the first stream is already
+    // equalized the way the user left it rather than starting flat and
+    // snapping a moment later.
+    var sound by remember { mutableStateOf(SoundStore.load(context)) }
+
     fun connect(ip: String) {
         receiver?.stop()
         val r = AudioReceiver(ip)
+        r.applySound(sound)
         runCatching { r.start() }
             .onSuccess {
                 receiver = r
@@ -106,6 +126,24 @@ private fun App(prefilledIp: String?) {
 
     DisposableEffect(Unit) { onDispose { receiver?.stop() } }
 
+    // Back must not be able to stop the music.
+    //
+    // Without this, Back finishes the activity, the composition leaves, the
+    // DisposableEffect above fires and the stream dies -- silently, with no
+    // confirmation, from the gesture people use to glance at something else.
+    // Backgrounding the task instead leaves the activity alive, so playback
+    // continues and Disconnect stays the only way to stop it.
+    //
+    // Enabled whenever a stream is live rather than only on the Now Playing
+    // tab: the tab you happen to be looking at is not a reason to lose your
+    // audio, and the Connect and Saved tabs are reachable mid-stream. With
+    // nothing playing there is nothing to protect, so Back behaves normally
+    // everywhere.
+    val activity = context as? Activity
+    BackHandler(enabled = receiver != null) {
+        activity?.moveTaskToBack(true)
+    }
+
     LaunchedEffect(prefilledIp) { if (prefilledIp != null) connect(prefilledIp) }
 
     Column(Modifier.fillMaxSize()) {
@@ -125,6 +163,20 @@ private fun App(prefilledIp: String?) {
                         status = it,
                         route = OutputRoute.unknownDefault,
                         onVolume = { id, v -> receiver?.setVolume(id, v) },
+                        sound = sound,
+                        onSound = { next ->
+                            // Applied first, persisted second. The listener is
+                            // waiting on the first and nobody is waiting on
+                            // the second, and a SharedPreferences commit on
+                            // the main thread between the slider and the
+                            // filters would be audible as lag.
+                            sound = next
+                            receiver?.applySound(next)
+                            SoundStore.save(context, next)
+                        },
+                        onCompare = { active, showEqualized ->
+                            receiver?.setCompare(active, showEqualized)
+                        },
                         onDisconnect = {
                             receiver?.stop()
                             receiver = null

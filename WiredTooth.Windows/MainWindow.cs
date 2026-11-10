@@ -117,7 +117,18 @@ public sealed class MainWindow : Window
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         TextOptions.SetTextFormattingMode(this, TextFormattingMode.Ideal);
 
-        _start = Controls.Primary("Start streaming", () => { _sender.Start(); Refresh(); });
+        _start = Controls.Primary("Start streaming", () =>
+        {
+            string? error = SenderStart.Try(_sender);
+            if (error is not null)
+            {
+                System.Windows.MessageBox.Show(
+                    error, Brand.Name,
+                    System.Windows.MessageBoxButton.OK,
+                    System.Windows.MessageBoxImage.Warning);
+            }
+            Refresh();
+        });
         // Not destructive: stopping loses nothing and one click undoes it. Red
         // here would be the app crying wolf, and an interface that cries wolf
         // on a safe action gets ignored on a dangerous one.
