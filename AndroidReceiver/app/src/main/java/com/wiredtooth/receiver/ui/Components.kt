@@ -455,12 +455,15 @@ fun VolumeSlider(
             },
         contentAlignment = Alignment.CenterStart,
     ) {
+        // An overlay, not a fixed colour, for the same reason as DbSlider: in
+        // the light palette surfaceRaised is pure white, so a track painted
+        // in it disappears against most things it can sit on.
         Box(
             Modifier
                 .fillMaxWidth()
                 .height(4.dp)
                 .clip(RoundedCornerShape(2.dp))
-                .background(p.surfaceRaised),
+                .background(p.textPrimary.copy(alpha = 0.18f)),
         )
 
         val travelDp = with(density) { (width - knobPx).coerceAtLeast(0f).toDp() }
@@ -470,7 +473,7 @@ fun VolumeSlider(
                 .width(travelDp * value + knob / 2)
                 .height(4.dp)
                 .clip(RoundedCornerShape(2.dp))
-                .background(if (value > 0f) p.accent else p.surfaceRaised),
+                .background(if (value > 0f) p.accent else p.textPrimary.copy(alpha = 0.18f)),
         )
 
         Box(

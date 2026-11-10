@@ -54,4 +54,14 @@ dependencies {
     // foundation gives layout, gestures and BasicText; the rest is ours.
 
     testImplementation("junit:junit:4.13.2")
+
+    // Instrumented tests only. These run the real AudioReceiver, the real
+    // AudioTrack and the real UI on a device or emulator, against a WTP1
+    // sender that lives in the same process on 127.0.0.1 -- which is what
+    // makes the loopback test independent of whatever owns port 5001 on the
+    // development machine.
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }

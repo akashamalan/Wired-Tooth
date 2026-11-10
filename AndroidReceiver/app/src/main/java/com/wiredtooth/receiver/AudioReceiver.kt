@@ -53,6 +53,21 @@ data class ReceiverStatus(
     val sampleRate: Int = 0,
     /** Filter-state resets forced by a non-finite sample. Should stay 0. */
     val eqResets: Long = 0,
+    /**
+     * Cost of the mix-to-bytes stage per 10 ms quantum, in nanoseconds, split
+     * by whether the equalizer was running.
+     *
+     * The pair is the point: the difference between them is what the
+     * equalizer actually costs, and each on its own says little. Worst matters
+     * more than average, because one quantum slower than the quantum itself is
+     * a late write to AudioTrack, which is a dropout.
+     */
+    val eqOnAvgNanos: Long = 0,
+    val eqOnWorstNanos: Long = 0,
+    val eqOnQuanta: Long = 0,
+    val eqOffAvgNanos: Long = 0,
+    val eqOffWorstNanos: Long = 0,
+    val eqOffQuanta: Long = 0,
 )
 
 /** One row of the stream list. */
@@ -152,6 +167,18 @@ class AudioReceiver(
      */
     @Volatile
     private var sound = SoundState()
+
+    /**
+     * Per-quantum cost of turning the mix into bytes, with and without the
+     * equalizer.
+     *
+     * Kept as two separate accumulators rather than one, because the useful
+     * figure is the difference: the bypass number is what this loop costs with
+     * no equalizer in the path at all, so subtracting it from the on number is
+     * the real price of the feature and nothing else.
+     */
+    private val eqOnNanos = NanoStats()
+    private val eqOffNanos = NanoStats()
 
     /** Counts how often the last line of defence actually fired. */
     private val clampedSamples = AtomicLong()
@@ -504,6 +531,12 @@ class AudioReceiver(
             // One snapshot drives both the decision and the processing, so
             // they cannot disagree if the user moves a slider mid-block.
             val eqSettings = eq.snapshot()
+
+            // Timed on both sides of the branch, into separate accumulators,
+            // because the question is not "how long does the equalizer take"
+            // but "how much longer than not having it". Timing only the on
+            // path would give a number with nothing to compare it against.
+            val startNanos = System.nanoTime()
             val clamped = if (eqSettings.enabled) {
                 val samples = frames * channels
                 Mixing.toFloat(mix, mixFloat, samples)
@@ -514,6 +547,10 @@ class AudioReceiver(
                 // bit-identical to having no equalizer in the build at all.
                 Mixing.clampInto(mix, out)
             }
+            val elapsedNanos = System.nanoTime() - startNanos
+            if (eqSettings.enabled) eqOnNanos.record(elapsedNanos)
+            else eqOffNanos.record(elapsedNanos)
+
             if (clamped > 0) clampedSamples.addAndGet(clamped.toLong())
 
             runCatching { t.write(out, 0, out.size) }
@@ -591,6 +628,19 @@ class AudioReceiver(
 
     fun soundState(): SoundState = sound
 
+    /**
+     * Clears the timing accumulators.
+     *
+     * Needed for an honest on-versus-off comparison: the first few quanta
+     * after the output opens include the JIT warming up on code that has
+     * never run, and a worst-case figure that is really a first-run figure
+     * says nothing about steady state.
+     */
+    fun resetTimings() {
+        eqOnNanos.reset()
+        eqOffNanos.reset()
+    }
+
     private fun pushSound() {
         eq.apply(sound.toEqSettings(sampleRate))
     }
@@ -632,6 +682,12 @@ class AudioReceiver(
             headroomDb = eq.snapshot().let { if (it.enabled && it.autoPreamp) it.preampDb else 0f },
             sampleRate = sampleRate,
             eqResets = eq.instabilityResets,
+            eqOnAvgNanos = eqOnNanos.average,
+            eqOnWorstNanos = eqOnNanos.worst,
+            eqOnQuanta = eqOnNanos.samples,
+            eqOffAvgNanos = eqOffNanos.average,
+            eqOffWorstNanos = eqOffNanos.worst,
+            eqOffQuanta = eqOffNanos.samples,
             kbitPerSecond = kbps,
             streams = channels.map {
                 StreamStatus(

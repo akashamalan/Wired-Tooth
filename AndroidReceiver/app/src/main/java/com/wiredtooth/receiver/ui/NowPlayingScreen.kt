@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -125,9 +126,7 @@ fun NowPlayingScreen(
         if (soundOpen && !confirming) {
             SoundSheet(
                 state = sound,
-                sampleRate = status.sampleRate,
-                clampedSamples = status.clampedSamples,
-                eqResets = status.eqResets,
+                status = status,
                 onChange = onSound,
                 onDismiss = { soundOpen = false },
             )
@@ -318,7 +317,7 @@ fun ConfirmSheet(
     Box(
         Modifier
             .fillMaxSize()
-            .alpha(progress)
+            .alpha(progress.coerceIn(0f, 1f))
             .background(Color.Black.copy(alpha = 0.45f))
             .pointerInput(Unit) { detectTapGestures { onCancel() } }
             .semantics { contentDescription = "Dismiss" },
@@ -330,8 +329,18 @@ fun ConfirmSheet(
                 .fillMaxWidth()
                 .then(
                     // Enters upward, leaves downward: the same path, mirrored.
-                    if (a11y.reduceMotion) Modifier.alpha(progress)
-                    else Modifier.padding(top = ((1f - progress) * 40).dp).alpha(progress),
+                    //
+                    // offset, NOT padding. motionMomentum is a low-bouncy
+                    // spring, so progress overshoots past 1.0 on the way in --
+                    // which is the entire point of using it for a sheet. A
+                    // negative padding throws ("Padding must be non-negative")
+                    // and takes the app down the moment the sheet opens; an
+                    // offset renders the overshoot as the slight over-travel
+                    // it is meant to be. Alpha is clamped for the same reason.
+                    if (a11y.reduceMotion) Modifier.alpha(progress.coerceIn(0f, 1f))
+                    else Modifier
+                        .offset(y = ((1f - progress) * 40).dp)
+                        .alpha(progress.coerceIn(0f, 1f)),
                 )
                 .clip(RoundedCornerShape(topStart = Radius.sheet, topEnd = Radius.sheet))
                 .background(p.surfaceRaised)

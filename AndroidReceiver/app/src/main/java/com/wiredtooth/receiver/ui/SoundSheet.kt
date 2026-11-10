@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +33,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.wiredtooth.receiver.ReceiverStatus
 import com.wiredtooth.receiver.dsp.EqSettings
 import com.wiredtooth.receiver.dsp.Preset
 import com.wiredtooth.receiver.dsp.SoundState
@@ -76,12 +78,11 @@ import kotlin.math.roundToInt
 @Composable
 fun SoundSheet(
     state: SoundState,
-    sampleRate: Int,
-    clampedSamples: Long,
-    eqResets: Long,
+    status: ReceiverStatus,
     onChange: (SoundState) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val sampleRate = status.sampleRate
     val p = LocalPalette.current
     val a11y = LocalA11y.current
 
@@ -109,7 +110,7 @@ fun SoundSheet(
     Box(
         Modifier
             .fillMaxSize()
-            .alpha(progress)
+            .alpha(progress.coerceIn(0f, 1f))
             .background(Color.Black.copy(alpha = 0.45f))
             .pointerInput(Unit) { detectTapGestures { onDismiss() } }
             .semantics { contentDescription = "Close sound settings" },
@@ -120,8 +121,18 @@ fun SoundSheet(
             Modifier
                 .fillMaxWidth()
                 .then(
-                    if (a11y.reduceMotion) Modifier.alpha(progress)
-                    else Modifier.padding(top = ((1f - progress) * 40).dp).alpha(progress),
+                    // offset, NOT padding. motionMomentum is a low-bouncy
+                    // spring, so progress overshoots past 1.0 on the way in --
+                    // which is the entire point of using it for a sheet. A
+                    // negative padding throws ("Padding must be non-negative")
+                    // and took the app down the first time the sheet was ever
+                    // opened on a device; an offset simply renders the
+                    // overshoot as the slight over-travel it is meant to be.
+                    // Alpha is clamped for the same reason.
+                    if (a11y.reduceMotion) Modifier.alpha(progress.coerceIn(0f, 1f))
+                    else Modifier
+                        .offset(y = ((1f - progress) * 40).dp)
+                        .alpha(progress.coerceIn(0f, 1f)),
                 )
                 .clip(RoundedCornerShape(topStart = Radius.sheet, topEnd = Radius.sheet))
                 .background(p.surfaceRaised),
@@ -308,31 +319,59 @@ fun SoundSheet(
                         SectionHeader("Diagnostics")
                         DetailRow(
                             label = "Clipped samples",
-                            value = clampedSamples.toString(),
-                            spoken = if (clampedSamples == 0L) {
-                                "No samples have been clipped. The preamp is holding."
+                            value = status.clampedSamples.toString(),
+                            spoken = if (status.clampedSamples == 0L) {
+                                "Clipped samples: none. The preamp is holding."
                             } else {
-                                "$clampedSamples samples clipped since connecting."
+                                "Clipped samples: ${status.clampedSamples} since connecting."
                             },
                         )
                         Spacer(Modifier.height(Space.half))
                         DetailRow(
                             label = "Filter resets",
-                            value = eqResets.toString(),
-                            spoken = if (eqResets == 0L) {
-                                "No filter resets. The equalizer is stable."
+                            value = status.eqResets.toString(),
+                            spoken = if (status.eqResets == 0L) {
+                                "Filter resets: none. The equalizer is stable."
                             } else {
-                                "$eqResets filter resets. This should be zero."
+                                "Filter resets: ${status.eqResets}. This should be zero."
                             },
+                        )
+                        Spacer(Modifier.height(Space.half))
+
+                        // The cost of the stage, with and without the filters.
+                        // The pair is the point: the difference is the price of
+                        // the feature, and either number alone says little.
+                        DetailRow(
+                            label = "Mix with EQ",
+                            value = micros(status.eqOnAvgNanos, status.eqOnWorstNanos),
+                            spoken = "Mix with equalizer: average " +
+                                "${status.eqOnAvgNanos} nanoseconds, worst " +
+                                "${status.eqOnWorstNanos} nanoseconds, over " +
+                                "${status.eqOnQuanta} quanta.",
+                        )
+                        Spacer(Modifier.height(Space.half))
+                        DetailRow(
+                            label = "Mix bypassed",
+                            value = micros(status.eqOffAvgNanos, status.eqOffWorstNanos),
+                            spoken = "Mix bypassed: average " +
+                                "${status.eqOffAvgNanos} nanoseconds, worst " +
+                                "${status.eqOffWorstNanos} nanoseconds, over " +
+                                "${status.eqOffQuanta} quanta.",
+                        )
+                        Spacer(Modifier.height(Space.half))
+                        DetailRow(
+                            label = "Underruns",
+                            value = status.underruns.toString(),
+                            spoken = "Underruns: ${status.underruns}.",
                         )
                         Spacer(Modifier.height(Space.half))
                         DetailRow(
                             label = "Rate",
                             value = if (sampleRate > 0) "$sampleRate Hz" else "--",
                             spoken = if (sampleRate > 0) {
-                                "Output running at $sampleRate hertz."
+                                "Rate: output running at $sampleRate hertz."
                             } else {
-                                "No output open yet."
+                                "Rate: no output open yet."
                             },
                         )
                     }
@@ -405,6 +444,18 @@ private fun HeadroomNote(preampDb: Float) {
         )
     }
 }
+
+/**
+ * "41 / 180 us" -- average and worst, in microseconds.
+ *
+ * Nanoseconds are the right unit to record and the wrong one to read: five
+ * digits of them side by side cannot be compared at a glance. The spoken
+ * version keeps the nanoseconds, because that is the one a diagnostic dump
+ * should be precise about.
+ */
+private fun micros(avgNanos: Long, worstNanos: Long): String =
+    if (worstNanos == 0L) "--"
+    else "${avgNanos / 1000} / ${worstNanos / 1000} us"
 
 /** One decimal, and never "-0.0 dB". */
 private fun fmtHeadroom(amount: Float): String = String.format("%.1f", amount)

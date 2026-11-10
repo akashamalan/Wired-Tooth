@@ -265,6 +265,17 @@ fun DbSlider(
     )
     val shown = if (dragging || a11y.reduceMotion) value else animated
 
+    // The track CANNOT be p.surfaceRaised, which is what every other slider
+    // in this app uses. This one lives on a sheet, and the sheet IS
+    // surfaceRaised, so the track would be drawn in the background's own
+    // colour and vanish -- which is exactly what the first emulator
+    // screenshot showed. In the light palette surfaceRaised is pure white,
+    // so it would be invisible there against almost anything. Deriving the
+    // track from the text colour at low alpha works on any surface in either
+    // palette, because it is an overlay rather than a fixed colour.
+    val trackColour = p.textPrimary.copy(alpha = 0.18f)
+    val tickColour = p.textPrimary.copy(alpha = 0.40f)
+
     val t = ((shown - min) / span).coerceIn(0f, 1f)
     val tZero = ((0f - min) / span).coerceIn(0f, 1f)
     val lo = minOf(t, tZero)
@@ -330,7 +341,7 @@ fun DbSlider(
                     .fillMaxWidth()
                     .height(4.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(p.surfaceRaised),
+                    .background(trackColour),
             )
 
             val travelDp = with(density) { (width - knobPx).coerceAtLeast(0f).toDp() }
@@ -342,7 +353,7 @@ fun DbSlider(
                     .offset(x = knob / 2 + travelDp * tZero - 1.dp)
                     .width(2.dp)
                     .height(10.dp)
-                    .background(p.hairline),
+                    .background(tickColour),
             )
 
             Box(
