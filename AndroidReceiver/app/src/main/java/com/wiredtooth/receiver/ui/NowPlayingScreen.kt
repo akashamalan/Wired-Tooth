@@ -61,6 +61,7 @@ fun NowPlayingScreen(
     onVolume: (Int, Float) -> Unit = { _, _ -> },
     sound: SoundState = SoundState(),
     onSound: (SoundState) -> Unit = {},
+    onCompare: (active: Boolean, showEqualized: Boolean) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     val p = LocalPalette.current
@@ -129,6 +130,7 @@ fun NowPlayingScreen(
                 status = status,
                 onChange = onSound,
                 onDismiss = { soundOpen = false },
+                onCompare = onCompare,
             )
         }
 

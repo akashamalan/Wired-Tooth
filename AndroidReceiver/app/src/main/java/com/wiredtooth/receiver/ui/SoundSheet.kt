@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -81,6 +82,7 @@ fun SoundSheet(
     status: ReceiverStatus,
     onChange: (SoundState) -> Unit,
     onDismiss: () -> Unit,
+    onCompare: (active: Boolean, showEqualized: Boolean) -> Unit = { _, _ -> },
 ) {
     val sampleRate = status.sampleRate
     val p = LocalPalette.current
@@ -95,6 +97,20 @@ fun SoundSheet(
     )
 
     var advanced by remember { mutableStateOf(false) }
+    var showingOriginal by remember { mutableStateOf(false) }
+
+    // Compare engages for as long as the sheet is open with the equalizer on,
+    // not from the first tap on the A/B control. That is what keeps the
+    // filters running continuously, so the very first comparison is as warm
+    // as the tenth. It costs one array copy and one blend pass per quantum on
+    // top of filtering that was happening anyway.
+    DisposableEffect(state.enabled) {
+        onCompare(state.enabled, !showingOriginal)
+        onDispose { onCompare(false, true) }
+    }
+    LaunchedEffect(showingOriginal, state.enabled) {
+        onCompare(state.enabled, !showingOriginal)
+    }
 
     // The figure actually applied to the signal, recomputed here rather than
     // read from the 500ms status poll so that it tracks a dragging finger.
@@ -265,6 +281,49 @@ fun SoundSheet(
                     Spacer(Modifier.height(Space.s2))
 
                     HeadroomNote(preampDb)
+
+                    // Directly under the headroom explanation, because this
+                    // is the answer to it: the equalizer is quieter, and here
+                    // is how to hear what it actually did to the tone rather
+                    // than to the volume.
+                    if (state.enabled) {
+                        Spacer(Modifier.height(Space.s2))
+                        SectionHeader("Compare")
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(Space.s1),
+                        ) {
+                            PresetChip(
+                                label = "Original",
+                                selected = showingOriginal,
+                                onClick = { showingOriginal = true },
+                                spokenLabel = if (showingOriginal) {
+                                    "Original, playing. The unprocessed sound."
+                                } else {
+                                    "Original. Double tap to hear the unprocessed " +
+                                        "sound at a matched level."
+                                },
+                            )
+                            PresetChip(
+                                label = "Equalized",
+                                selected = !showingOriginal,
+                                onClick = { showingOriginal = false },
+                                spokenLabel = if (!showingOriginal) {
+                                    "Equalized, playing. Your settings applied."
+                                } else {
+                                    "Equalized. Double tap to hear your settings applied."
+                                },
+                            )
+                        }
+                        Spacer(Modifier.height(Space.half))
+                        WtText(
+                            text = "Levels matched approximately. The original is turned " +
+                                "down to meet the equalized side, so you are comparing " +
+                                "tone and not volume.",
+                            style = Type.caption,
+                            color = p.textTertiary,
+                        )
+                    }
 
                     Spacer(Modifier.height(Space.s2))
                     Hairline()

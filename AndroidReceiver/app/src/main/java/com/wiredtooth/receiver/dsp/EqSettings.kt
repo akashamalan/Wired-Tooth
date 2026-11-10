@@ -62,6 +62,37 @@ data class EqSettings(
         if (autoPreamp) FrequencyResponse.preampDb(bands, sampleRateForPreamp) else 0f
 
     /**
+     * How far to turn the ORIGINAL side down in Compare mode, in dB.
+     *
+     * Zero or negative, never a boost, and never applied to the equalized
+     * side. The equalizer lowers the level to make room for its boosts, so
+     * without this an A/B button is a loudness test wearing a tone test's
+     * clothing: the equalized side is quieter, quieter reads as worse, and
+     * the comparison answers a question nobody asked.
+     *
+     * WHY IT CAN ONLY EVER BE AN ATTENUATION. The weighted average of |H|^2
+     * cannot exceed the maximum of |H|^2, and [preampDb] is minus the peak
+     * plus a further 0.5 dB margin. So the equalized side's weighted gain is
+     * at most -0.5 dB whenever anything boosts, and at most 0 when nothing
+     * does. The equalized side is therefore never the louder one, which is
+     * what makes "turn the louder side down" always mean the original side
+     * and lets the match cost no headroom at all. The coerceAtMost is a
+     * belt-and-braces guard on that proof, not a behaviour anyone can reach.
+     *
+     * HOW APPROXIMATE. The weighting is a fixed, pink-derived model of
+     * average music, not a measurement of what is actually playing. It is
+     * close on dense material and least reliable on sparse material whose
+     * energy sits in one place -- a solo voice, or a bass-heavy electronic
+     * track -- where the real spectrum and the assumed one diverge most. It
+     * is not a loudness measurement: no K-weighting, no gating. The UI says
+     * "Levels matched approximately" because that is the honest claim.
+     */
+    val compareDryTrimDb: Float =
+        (FrequencyResponse.weightedGainDb(bands, sampleRateForPreamp) + preampDb)
+            .coerceAtMost(0.0)
+            .toFloat()
+
+    /**
      * The largest single boost in the curve.
      *
      * No longer what drives the preamp -- it under-corrects whenever bands

@@ -1,5 +1,6 @@
 package com.wiredtooth.receiver
 
+import com.wiredtooth.receiver.dsp.CompareFader
 import com.wiredtooth.receiver.dsp.EqEngine
 import com.wiredtooth.receiver.dsp.EqSettings
 import java.util.concurrent.atomic.AtomicBoolean
@@ -69,6 +70,12 @@ internal object EqWarmup {
     const val LOUD_QUANTA = 20
 
     /**
+     * Quanta through the Compare path, enough to travel the 50 ms crossfade
+     * in both directions with room to spare.
+     */
+    const val COMPARE_QUANTA = 40
+
+    /**
      * Must not be called on the playback thread or the main thread.
      *
      * It deliberately does a second or so of DSP work; the whole point is to
@@ -117,6 +124,29 @@ internal object EqWarmup {
                 }
                 engine.process(settings, buf, frames)
                 Mixing.clampInto(buf, out, samples)
+            }
+
+            // The Compare path is separate code -- an extra copy, the blend,
+            // and a different branch in the playback loop -- so warming the
+            // plain EQ path leaves it cold. Measured: the first quantum after
+            // Compare engaged took 39.4 ms before this block existed, which
+            // is the same cold-start problem one level along.
+            val fader = CompareFader()
+            fader.configure(sampleRate)
+            fader.snapToEqualized()
+            fader.request(showEqualized = false, dryTrimDb = settings.compareDryTrimDb)
+            val dry = FloatArray(samples)
+            repeat(COMPARE_QUANTA) {
+                java.util.Arrays.fill(mix, 0)
+                Mixing.toFloat(mix, dry, samples)
+                System.arraycopy(dry, 0, buf, 0, samples)
+                engine.process(settings, buf, frames)
+                fader.blend(dry, buf, frames, channels)
+                Mixing.clampInto(buf, out, samples)
+                // Travel the fade both ways, so neither direction is first.
+                if (it == COMPARE_QUANTA / 2) {
+                    fader.request(showEqualized = true, dryTrimDb = settings.compareDryTrimDb)
+                }
             }
 
             // A second settings object, so the UI's slider path is compiled

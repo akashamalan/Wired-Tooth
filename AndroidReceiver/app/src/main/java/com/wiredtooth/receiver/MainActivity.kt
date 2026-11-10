@@ -174,6 +174,9 @@ private fun App(prefilledIp: String?) {
                             receiver?.applySound(next)
                             SoundStore.save(context, next)
                         },
+                        onCompare = { active, showEqualized ->
+                            receiver?.setCompare(active, showEqualized)
+                        },
                         onDisconnect = {
                             receiver?.stop()
                             receiver = null

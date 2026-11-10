@@ -3,6 +3,7 @@ package com.wiredtooth.receiver
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import com.wiredtooth.receiver.dsp.CompareFader
 import com.wiredtooth.receiver.dsp.EqEngine
 import com.wiredtooth.receiver.dsp.EqSettings
 import com.wiredtooth.receiver.dsp.SoundState
@@ -186,6 +187,23 @@ class AudioReceiver(
      */
     private val eqOnNanos = NanoStats()
     private val eqOffNanos = NanoStats()
+
+    /**
+     * Compare mode: the A/B button in the Sound sheet.
+     *
+     * [compareRequested] is what the UI asked for. The PATH stays engaged
+     * past the moment the request drops, until the fader has arrived back at
+     * the equalized side, because that is the only point where handing back
+     * to the ordinary path is silent -- there the fader outputs the filtered
+     * signal unaltered, so the two paths produce identical bytes.
+     */
+    private val fader = CompareFader()
+
+    @Volatile
+    private var compareRequested = false
+
+    @Volatile
+    private var compareEngaged = false
 
     /** Counts how often the last line of defence actually fired. */
     private val clampedSamples = AtomicLong()
@@ -441,6 +459,8 @@ class AudioReceiver(
         // for the old rate -- silently, and in the direction of too little
         // headroom. Recomputing here is also what keeps the number shown in
         // the UI equal to the gain actually applied.
+        fader.configure(rate)
+        fader.snapToEqualized()
         pushSound()
 
         val mask = if (ch == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
@@ -499,6 +519,7 @@ class AudioReceiver(
         var scratch = ByteArray(0)
         var mix = IntArray(0)
         var mixFloat = FloatArray(0)
+        var dryFloat = FloatArray(0)
         var out = ByteArray(0)
 
         while (running) {
@@ -515,6 +536,7 @@ class AudioReceiver(
                 scratch = ByteArray(needed)
                 mix = IntArray(frames * channels)
                 mixFloat = FloatArray(frames * channels)
+                dryFloat = FloatArray(frames * channels)
                 out = ByteArray(needed)
             }
 
@@ -543,8 +565,30 @@ class AudioReceiver(
             // because the question is not "how long does the equalizer take"
             // but "how much longer than not having it". Timing only the on
             // path would give a number with nothing to compare it against.
+            // Compare stays engaged until the fader is home, so the handover
+            // back to the ordinary path happens at the one instant the two
+            // produce identical output.
+            if (compareRequested && eqSettings.enabled) {
+                compareEngaged = true
+            } else if (compareEngaged && fader.atRest()) {
+                compareEngaged = false
+            }
+
             val startNanos = System.nanoTime()
-            val clamped = if (eqSettings.enabled) {
+            val clamped = if (compareEngaged && eqSettings.enabled) {
+                val samples = frames * channels
+                Mixing.toFloat(mix, dryFloat, samples)
+                // ONE engine and ONE scratch copy, not two engines. The
+                // equalizer runs on every quantum for as long as Compare is
+                // open, whichever side is audible, so its filter state is
+                // always settled and its code always hot. A toggle then moves
+                // nothing but the blend coefficient -- there is no cold start
+                // to hear, and no IIR refill swelling in behind it.
+                System.arraycopy(dryFloat, 0, mixFloat, 0, samples)
+                eq.process(eqSettings, mixFloat, frames)
+                fader.blend(dryFloat, mixFloat, frames, channels)
+                Mixing.clampInto(mixFloat, out, samples)
+            } else if (eqSettings.enabled) {
                 val samples = frames * channels
                 Mixing.toFloat(mix, mixFloat, samples)
                 eq.process(eqSettings, mixFloat, frames)
@@ -643,6 +687,21 @@ class AudioReceiver(
      * never run, and a worst-case figure that is really a first-run figure
      * says nothing about steady state.
      */
+    /**
+     * Opens or closes Compare mode and chooses the audible side.
+     *
+     * The dry trim is read from the live settings rather than taken from the
+     * caller, so the level match can never disagree with the curve that is
+     * actually running.
+     */
+    fun setCompare(active: Boolean, showEqualized: Boolean) {
+        compareRequested = active
+        if (active) fader.request(showEqualized, eq.snapshot().compareDryTrimDb)
+        else fader.release()
+    }
+
+    fun compareActive(): Boolean = compareEngaged
+
     fun resetTimings() {
         eqOnNanos.reset()
         eqOffNanos.reset()

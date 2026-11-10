@@ -292,6 +292,16 @@ class Step5Test {
             Thread.sleep(1_500)
             shoot(dir, "02-sound-bass")
 
+            // The Compare control sits under the headroom note, so it needs a
+            // scroll to come into frame.
+            run {
+                val w0 = device.displayWidth
+                val h0 = device.displayHeight
+                device.swipe(w0 / 2, (h0 * 0.80).toInt(), w0 / 2, (h0 * 0.55).toInt(), 20)
+                Thread.sleep(1_000)
+                shoot(dir, "06-sound-compare")
+            }
+
             tapByDesc("Advanced", "the Advanced disclosure")
             Thread.sleep(1_200)
             shoot(dir, "03-sound-advanced-collapsed-view")
@@ -449,10 +459,107 @@ class Step5Test {
         )
     }
 
+    // ---- Compare mode, end to end --------------------------------------
+
+    /**
+     * Compare engages, toggles both ways, disengages, and costs nothing
+     * permanent.
+     *
+     * The headroom check is the important one. The level match is a property
+     * of the comparison and not of the sound, so leaving Compare has to put
+     * the listener back exactly where they were -- the preamp must be the
+     * number it was before, and the dry trim must be gone.
+     */
+    @Test
+    fun h_compareModeTogglesCleanlyAndLeavesNoTrace() {
+        // The real app warms this at launch; this test builds the receiver
+        // directly, so it has to do the same or it is measuring a path the
+        // shipping app never takes.
+        EqWarmup.warm()
+
+        val sender = TestSender()
+        sender.start()
+        val receiver = AudioReceiver("127.0.0.1")
+        try {
+            receiver.applySound(
+                SoundState(enabled = true, preset = Preset.Bass).withBass(6f),
+            )
+            receiver.start()
+            waitFor(15_000, "connection") { receiver.status().packetsReceived > 200 }
+            waitFor(15_000, "playback to start") { receiver.status().bufferMs > 0 }
+            Thread.sleep(4_000)
+            receiver.resetTimings()
+
+            val headroomBefore = receiver.status().headroomDb
+            val underrunsBefore = receiver.status().underruns
+
+            receiver.setCompare(active = true, showEqualized = true)
+            waitFor(5_000, "compare to engage") { receiver.compareActive() }
+            Thread.sleep(1_500)
+
+            // Four toggles, each well longer than the 50 ms fade.
+            repeat(4) { i ->
+                receiver.setCompare(active = true, showEqualized = i % 2 == 1)
+                Thread.sleep(1_200)
+            }
+
+            val duringStatus = receiver.status()
+
+            receiver.setCompare(active = false, showEqualized = true)
+            waitFor(5_000, "compare to release") { !receiver.compareActive() }
+            Thread.sleep(2_000)
+
+            val after = receiver.status()
+            log("COMPARE headroomBefore=$headroomBefore headroomAfter=${after.headroomDb}")
+            log("COMPARE underrunsBefore=$underrunsBefore underrunsAfter=${after.underruns}")
+            log("COMPARE duringAvgNanos=${duringStatus.eqOnAvgNanos} " +
+                "duringWorstNanos=${duringStatus.eqOnWorstNanos} " +
+                "clamped=${after.clampedSamples} resets=${after.eqResets}")
+
+            assertEquals(
+                "leaving Compare must not move the preamp",
+                headroomBefore, after.headroomDb, 0f,
+            )
+            assertEquals("Compare must not cost underruns", underrunsBefore, after.underruns)
+            assertEquals("the filters must stay stable", 0L, after.eqResets)
+            // The criterion that matters is the quantum budget: 10 ms. A
+            // quantum slower than that is a late write to AudioTrack, which
+            // is a dropout. 8 ms keeps a margin without being so tight that
+            // emulator scheduling noise decides the result.
+            assertTrue(
+                "worst quantum during Compare was ${duringStatus.eqOnWorstNanos}ns, " +
+                    "against a 10ms quantum",
+                duringStatus.eqOnWorstNanos < 8_000_000L,
+            )
+        } finally {
+            receiver.stop()
+            Thread.sleep(1_000)
+            sender.stop()
+            Thread.sleep(500)
+        }
+    }
+
+    /**
+     * Finds a control by description, scrolling the sheet if it is off screen.
+     *
+     * The sheet is height-capped and scrolls, and it grows as features are
+     * added, so a control that was in frame last month may not be today.
+     * Hunting for it is what a person would do, and it keeps the test from
+     * failing for a reason that has nothing to do with the thing it tests.
+     */
     private fun tapByDesc(fragment: String, label: String) {
-        val o = device.wait(Until.findObject(By.descContains(fragment)), 10_000)
-        assertTrue("$label must be findable by description", o != null)
-        o!!.click()
+        repeat(4) { attempt ->
+            val o = device.wait(Until.findObject(By.descContains(fragment)), 3_000)
+            if (o != null) {
+                o.click()
+                return
+            }
+            val w = device.displayWidth
+            val h = device.displayHeight
+            device.swipe(w / 2, (h * 0.78).toInt(), w / 2, (h * 0.48).toInt(), 20)
+            Thread.sleep(600)
+        }
+        throw AssertionError("$label must be findable by description")
     }
 
     /**
