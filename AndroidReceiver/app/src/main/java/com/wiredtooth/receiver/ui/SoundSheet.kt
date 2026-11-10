@@ -1,6 +1,16 @@
 package com.wiredtooth.receiver.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import com.wiredtooth.receiver.dsp.EqBand
+import com.wiredtooth.receiver.dsp.FrequencyResponse
+import kotlin.math.ln
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -341,7 +351,13 @@ fun SoundSheet(
                     )
 
                     if (advanced) {
-                        Spacer(Modifier.height(Space.s1))
+                        Spacer(Modifier.height(Space.s2))
+                        CurveGraph(
+                            bands = EqSettings.fromGains(state.gains()),
+                            preampDb = preampDb,
+                            sampleRate = sampleRate,
+                        )
+                        Spacer(Modifier.height(Space.s2))
                         for (i in 0 until EqSettings.BAND_COUNT) {
                             val hz = EqSettings.CENTRES_HZ[i]
                             DbSlider(
@@ -449,6 +465,184 @@ fun SoundSheet(
             }
         }
     }
+}
+
+/**
+ * THE CURVE
+ *
+ * The combined response of all ten bands, drawn from the same
+ * [FrequencyResponse] scan that computes the preamp and the loudness match.
+ * One magnitude implementation, three readers -- which is what guarantees the
+ * line on screen is the filter the audio thread is running, and not a second
+ * opinion free to drift away from it unnoticed.
+ *
+ * No FFT, and no analysis of the audio. This draws what the filters are set
+ * to do, not what the music is doing, and those are different claims.
+ *
+ * The faint dashed line is where the preamp sits. Without it the graph would
+ * show a curve rising confidently above zero while the thing you actually
+ * hear is that whole shape pulled down below it -- which is the exact
+ * misunderstanding the headroom note above exists to prevent.
+ */
+@Composable
+private fun CurveGraph(
+    bands: List<EqBand>,
+    preampDb: Float,
+    sampleRate: Int,
+    modifier: Modifier = Modifier,
+) {
+    val p = LocalPalette.current
+    val rate = if (sampleRate > 0) sampleRate else 48000
+
+    val curve = remember(bands, rate) { FrequencyResponse.curveDb(bands, rate, GRAPH_POINTS) }
+    val spoken = remember(bands, preampDb) { describeCurve(bands, preampDb) }
+
+    val minDb = EqSettings.MIN_GAIN_DB.toDouble()
+    val maxDb = SoundState.MAX_BOOST_DB.toDouble()
+    val span = maxDb - minDb
+    val top = FrequencyResponse.topHz(rate)
+    val logSpan = ln(top / FrequencyResponse.MIN_HZ)
+
+    val grid = p.textPrimary.copy(alpha = 0.16f)
+    val zeroLine = p.textPrimary.copy(alpha = 0.34f)
+    val preampColour = p.warn.copy(alpha = 0.55f)
+    val curveColour = p.accent
+
+    Column(modifier.fillMaxWidth()) {
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .height(112.dp)
+                .clearAndSetSemantics { contentDescription = spoken },
+        ) {
+            val w = size.width
+            val h = size.height
+
+            fun yFor(db: Double): Float =
+                (h * (maxDb - db.coerceIn(minDb, maxDb)) / span).toFloat()
+
+            fun xFor(hz: Double): Float =
+                (w * ln(hz / FrequencyResponse.MIN_HZ) / logSpan).toFloat()
+
+            // Decade gridlines, unlabelled on purpose: three faint verticals
+            // say "this axis is logarithmic" without adding text that would
+            // compete with the numbers already on this sheet.
+            for (hz in listOf(100.0, 1000.0, 10000.0)) {
+                if (hz < top) {
+                    val x = xFor(hz)
+                    drawLine(grid, Offset(x, 0f), Offset(x, h), strokeWidth = 1.dp.toPx())
+                }
+            }
+
+            val yZero = yFor(0.0)
+            drawLine(zeroLine, Offset(0f, yZero), Offset(w, yZero), strokeWidth = 1.dp.toPx())
+
+            if (preampDb < -0.05f) {
+                val yPre = yFor(preampDb.toDouble())
+                drawLine(
+                    color = preampColour,
+                    start = Offset(0f, yPre),
+                    end = Offset(w, yPre),
+                    strokeWidth = 1.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(
+                        floatArrayOf(6.dp.toPx(), 6.dp.toPx()),
+                    ),
+                )
+            }
+
+            val path = Path()
+            for (k in curve.indices) {
+                val x = w * k / (curve.size - 1).toFloat()
+                val y = yFor(curve[k].toDouble())
+                if (k == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            drawPath(
+                path = path,
+                color = curveColour,
+                style = Stroke(
+                    width = 2.dp.toPx(),
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round,
+                ),
+            )
+        }
+
+        Spacer(Modifier.height(Space.half))
+
+        // Only frequencies on the frequency axis. An earlier version put
+        // "0 dB" in the middle of this row, where it read as a label for the
+        // mid-frequency gridline rather than for the horizontal baseline.
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clearAndSetSemantics { },
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            WtText("20 Hz", Type.caption, p.textTertiary)
+            WtText("${(top / 1000).roundToInt()} kHz", Type.caption, p.textTertiary)
+        }
+
+        Spacer(Modifier.height(Space.half))
+        WtText(
+            text = if (preampDb < -0.05f) {
+                "Solid line: your curve. Flat line: no change. Dotted line: the " +
+                    "${String.format("%.1f", -preampDb)} dB everything is turned down by."
+            } else {
+                "Solid line: your curve. Flat line: no change."
+            },
+            style = Type.caption,
+            color = p.textTertiary,
+            modifier = Modifier.clearAndSetSemantics { },
+        )
+    }
+}
+
+/** Points the line is drawn from. Smooth at any phone width. */
+private const val GRAPH_POINTS = 160
+
+/**
+ * The curve in words, because a Canvas is an empty rectangle to a screen
+ * reader.
+ *
+ * Describes the SHAPE rather than reading ten numbers out: a list of ten
+ * gains is data, while "boosted at 31 and 62 hertz" is the thing the picture
+ * actually communicates to everybody else.
+ */
+private fun describeCurve(bands: List<EqBand>, preampDb: Float): String {
+    val boosted = bands.filter { it.gainDb >= 0.5f }
+    val cut = bands.filter { it.gainDb <= -0.5f }
+
+    if (boosted.isEmpty() && cut.isEmpty()) {
+        return "Response graph: flat. Nothing is boosted or cut."
+    }
+
+    val parts = mutableListOf<String>()
+    if (boosted.isNotEmpty()) {
+        val most = boosted.maxByOrNull { it.gainDb }!!
+        parts += "boosted at " + listSpoken(boosted.map { spokenHz(it.frequencyHz) }) +
+            ", most at " + spokenHz(most.frequencyHz) +
+            " by " + String.format("%.1f", most.gainDb) + " decibels"
+    }
+    if (cut.isNotEmpty()) {
+        val least = cut.minByOrNull { it.gainDb }!!
+        parts += "cut at " + listSpoken(cut.map { spokenHz(it.frequencyHz) }) +
+            ", most at " + spokenHz(least.frequencyHz) +
+            " by " + String.format("%.1f", -least.gainDb) + " decibels"
+    }
+
+    val tail = if (preampDb < -0.05f) {
+        " The whole curve is then turned down by " +
+            String.format("%.1f", -preampDb) + " decibels to make room."
+    } else {
+        ""
+    }
+    return "Response graph: " + parts.joinToString("; ") + "." + tail
+}
+
+private fun listSpoken(items: List<String>): String = when (items.size) {
+    1 -> items[0]
+    2 -> items[0] + " and " + items[1]
+    else -> items.dropLast(1).joinToString(", ") + " and " + items.last()
 }
 
 /**

@@ -48,8 +48,8 @@ internal object FrequencyResponse {
      */
     const val POINTS = 256
 
-    private const val MIN_HZ = 20.0
-    private const val MAX_HZ = 20000.0
+    const val MIN_HZ = 20.0
+    const val MAX_HZ = 20000.0
 
     /**
      * Extra reduction below the measured peak, in dB.
@@ -68,12 +68,30 @@ internal object FrequencyResponse {
      */
     const val HEADROOM_MARGIN_DB = 0.5
 
-    /** Highest point of the combined response, in dB. Negative if the curve only cuts. */
-    fun peakGainDb(bands: List<EqBand>, sampleRate: Int): Double {
-        if (bands.isEmpty() || sampleRate <= 0) return 0.0
+    /** The highest frequency worth scanning at this rate. */
+    fun topHz(sampleRate: Int): Double = minOf(MAX_HZ, sampleRate * 0.5 * 0.95)
 
-        val top = minOf(MAX_HZ, sampleRate * 0.5 * 0.95)
-        if (top <= MIN_HZ) return 0.0
+    /**
+     * Walks the log-spaced grid, handing each point's frequency and combined
+     * magnitude to [body].
+     *
+     * THE ONLY PLACE THE CASCADE'S MAGNITUDE IS COMPUTED. The preamp, the
+     * loudness match and the on-screen curve all come through here, which is
+     * what guarantees the graph cannot draw one thing while the preamp
+     * assumes another. Three copies of this loop would eventually disagree,
+     * and the disagreement would be invisible until somebody's ears found it.
+     *
+     * Returns false if there is nothing to scan.
+     */
+    private inline fun scan(
+        bands: List<EqBand>,
+        sampleRate: Int,
+        points: Int,
+        body: (index: Int, freqHz: Double, magnitude: Double) -> Unit,
+    ): Boolean {
+        if (bands.isEmpty() || sampleRate <= 0 || points < 2) return false
+        val top = topHz(sampleRate)
+        if (top <= MIN_HZ) return false
 
         val coef = DoubleArray(bands.size * Biquad.COEFFS)
         for (i in bands.indices) {
@@ -87,15 +105,37 @@ internal object FrequencyResponse {
         }
 
         val span = ln(top / MIN_HZ)
-        var peak = 0.0
-        for (k in 0 until POINTS) {
-            val f = MIN_HZ * exp(span * k / (POINTS - 1).toDouble())
+        for (k in 0 until points) {
+            val f = MIN_HZ * exp(span * k / (points - 1).toDouble())
             val w = 2.0 * PI * f / sampleRate
             var mag = 1.0
             for (i in bands.indices) mag *= sectionMagnitude(coef, i * Biquad.COEFFS, w)
-            if (mag > peak) peak = mag
+            body(k, f, mag)
         }
-        return if (peak <= 0.0) 0.0 else 20.0 * log10(peak)
+        return true
+    }
+
+    /** Highest point of the combined response, in dB. Negative if the curve only cuts. */
+    fun peakGainDb(bands: List<EqBand>, sampleRate: Int): Double {
+        var peak = 0.0
+        val ran = scan(bands, sampleRate, POINTS) { _, _, mag -> if (mag > peak) peak = mag }
+        if (!ran || peak <= 0.0) return 0.0
+        return 20.0 * log10(peak)
+    }
+
+    /**
+     * The combined response in dB at [points] log-spaced frequencies from
+     * [MIN_HZ] to [topHz], for drawing.
+     *
+     * The same scan the preamp uses, so the line on screen is the curve the
+     * audio thread is actually running and not a second opinion about it.
+     */
+    fun curveDb(bands: List<EqBand>, sampleRate: Int, points: Int = POINTS): FloatArray {
+        val out = FloatArray(points)
+        scan(bands, sampleRate, points) { k, _, mag ->
+            out[k] = if (mag <= 0.0) -120f else (20.0 * log10(mag)).toFloat()
+        }
+        return out
     }
 
     /**
@@ -167,35 +207,14 @@ internal object FrequencyResponse {
      * for what that costs.
      */
     fun weightedGainDb(bands: List<EqBand>, sampleRate: Int): Double {
-        if (bands.isEmpty() || sampleRate <= 0) return 0.0
-
-        val top = minOf(MAX_HZ, sampleRate * 0.5 * 0.95)
-        if (top <= MIN_HZ) return 0.0
-
-        val coef = DoubleArray(bands.size * Biquad.COEFFS)
-        for (i in bands.indices) {
-            Biquad.designPeaking(
-                coef, i * Biquad.COEFFS,
-                bands[i].frequencyHz.toDouble(),
-                bands[i].q.toDouble(),
-                bands[i].gainDb.toDouble(),
-                sampleRate.toDouble(),
-            )
-        }
-
-        val span = ln(top / MIN_HZ)
         var weightedPower = 0.0
         var weightSum = 0.0
-        for (k in 0 until POINTS) {
-            val f = MIN_HZ * exp(span * k / (POINTS - 1).toDouble())
+        val ran = scan(bands, sampleRate, POINTS) { _, f, mag ->
             val w = 10.0.pow(weightDb(f) / 10.0)
-            val wq = 2.0 * PI * f / sampleRate
-            var mag = 1.0
-            for (i in bands.indices) mag *= sectionMagnitude(coef, i * Biquad.COEFFS, wq)
             weightedPower += w * mag * mag          // power, so magnitude squared
             weightSum += w
         }
-        if (weightSum <= 0.0 || weightedPower <= 0.0) return 0.0
+        if (!ran || weightSum <= 0.0 || weightedPower <= 0.0) return 0.0
         return 10.0 * log10(weightedPower / weightSum)
     }
 

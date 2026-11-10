@@ -307,11 +307,16 @@ class Step5Test {
             shoot(dir, "03-sound-advanced-collapsed-view")
 
             // The sheet is height-capped and scrolls, so expanding Advanced
-            // puts the ten bands below the fold. Scroll them into view, or the
-            // screenshot shows a disclosure that appears to have done nothing.
+            // puts the response graph and the ten bands below the fold.
+            // Scroll in two stages: the graph sits directly under the
+            // disclosure, the bands under that.
             val w = device.displayWidth
             val h = device.displayHeight
-            device.swipe(w / 2, (h * 0.80).toInt(), w / 2, (h * 0.35).toInt(), 20)
+            device.swipe(w / 2, (h * 0.78).toInt(), w / 2, (h * 0.56).toInt(), 20)
+            Thread.sleep(1_000)
+            shoot(dir, "07-sound-curve")
+
+            device.swipe(w / 2, (h * 0.80).toInt(), w / 2, (h * 0.40).toInt(), 20)
             Thread.sleep(1_200)
             shoot(dir, "03-sound-advanced")
 
