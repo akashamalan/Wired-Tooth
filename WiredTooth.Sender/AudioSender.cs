@@ -95,7 +95,23 @@ public sealed class AudioSender : IDisposable
 
         _cts = new CancellationTokenSource();
         _audioUdp = new UdpClient();
-        _controlUdp = new UdpClient(ControlPort);
+
+        // Binding the control port is the step that fails when a second copy
+        // is already running. Without this the partially built state leaks:
+        // IsRunning stays false, so the caller is free to retry, and every
+        // retry would strand another UdpClient and another token source.
+        try
+        {
+            _controlUdp = new UdpClient(ControlPort);
+        }
+        catch
+        {
+            _audioUdp?.Dispose();
+            _audioUdp = null;
+            _cts?.Dispose();
+            _cts = null;
+            throw;
+        }
 
         RebuildTargets();
 

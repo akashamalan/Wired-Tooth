@@ -70,7 +70,13 @@ public static class Program
 
         using var sender = new AudioSender(forced);
         sender.Log += Console.WriteLine;
-        sender.Start();
+
+        string? startError = SenderStart.Try(sender);
+        if (startError is not null)
+        {
+            Console.WriteLine(startError);
+            return 1;
+        }
 
         Console.WriteLine();
         Console.WriteLine("Waiting for a client to say HELLO...");
