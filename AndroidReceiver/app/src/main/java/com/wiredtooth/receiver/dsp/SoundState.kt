@@ -37,14 +37,35 @@ data class SoundState(
     fun gains(): List<Float> {
         custom?.let { c ->
             return List(EqSettings.BAND_COUNT) {
-                (c.getOrNull(it) ?: 0f).coerceIn(EqSettings.MIN_GAIN_DB, EqSettings.MAX_GAIN_DB)
+                (c.getOrNull(it) ?: 0f).coerceIn(EqSettings.MIN_GAIN_DB, MAX_BOOST_DB)
             }
         }
-        val base = preset.gains
         return List(EqSettings.BAND_COUNT) { i ->
-            (base[i] + bassDb * BASS_WEIGHTS[i] + warmthDb * WARMTH_WEIGHTS[i])
-                .coerceIn(EqSettings.MIN_GAIN_DB, EqSettings.MAX_GAIN_DB)
+            rawGain(i).coerceIn(EqSettings.MIN_GAIN_DB, MAX_BOOST_DB)
         }
+    }
+
+    /** The preset and macros summed, before the boost cap. */
+    private fun rawGain(i: Int): Float =
+        preset.gains[i] + bassDb * BASS_WEIGHTS[i] + warmthDb * WARMTH_WEIGHTS[i]
+
+    /**
+     * How many bands the boost cap is currently holding back.
+     *
+     * Only meaningful on the generated path, and deliberately zero once the
+     * curve has been hand-edited: there the user set the number themselves and
+     * the slider already stopped at the cap, so there is nothing hidden to
+     * disclose. The cap is worth mentioning precisely when it is invisible --
+     * when a preset and a macro both pushed the same band and the sum was
+     * quietly trimmed.
+     */
+    fun cappedBandCount(): Int {
+        if (custom != null) return 0
+        var n = 0
+        for (i in 0 until EqSettings.BAND_COUNT) {
+            if (rawGain(i) > MAX_BOOST_DB + 1e-4f) n++
+        }
+        return n
     }
 
     /**
@@ -77,7 +98,7 @@ data class SoundState(
     fun withBandGain(index: Int, db: Float): SoundState {
         if (index !in 0 until EqSettings.BAND_COUNT) return this
         val next = gains().toMutableList()
-        next[index] = db.coerceIn(EqSettings.MIN_GAIN_DB, EqSettings.MAX_GAIN_DB)
+        next[index] = db.coerceIn(EqSettings.MIN_GAIN_DB, MAX_BOOST_DB)
         return copy(custom = next)
     }
 
@@ -85,6 +106,36 @@ data class SoundState(
     fun withoutCustom(): SoundState = copy(custom = null)
 
     companion object {
+        /**
+         * The most any one band may be boosted, after the preset and the
+         * macros have been summed.
+         *
+         * WHY 8 AND NOT THE ENGINE'S 12. The cost of a boost is not the boost,
+         * it is the preamp that pays for it, and that cost grows faster than
+         * the number on the slider because neighbouring bands overlap and sum.
+         * Measured on this curve set, a preset at +6 with the matching macro
+         * at +6 reached the old +12 ceiling on three bands and cost 15.3 dB of
+         * headroom -- a reduction large enough that the honest description of
+         * the feature became "it makes everything quieter and slightly
+         * different", which is not what anyone wants from a bass control.
+         *
+         * Eight decibels on a single band is still a large, clearly audible
+         * move. What it is not is a move that spends the whole dynamic range
+         * paying for itself.
+         *
+         * ASYMMETRIC ON PURPOSE. Cuts stay at [EqSettings.MIN_GAIN_DB]. A
+         * cascade of peaking sections that only cuts cannot exceed unity, so a
+         * cut costs no headroom at all and there is nothing here to protect
+         * against. Capping both directions would remove useful range for no
+         * benefit.
+         *
+         * The engine's own limit stays at 12: this is a limit on the curve the
+         * user can ask for, not on what the filters can do, and keeping the
+         * two separate means a stored curve from an older build is clamped
+         * rather than rejected.
+         */
+        const val MAX_BOOST_DB = 8f
+
         /**
          * The macro sliders stop at 6 dB, half of what a single band allows.
          *

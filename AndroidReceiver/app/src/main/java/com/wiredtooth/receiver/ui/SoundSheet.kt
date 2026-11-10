@@ -216,6 +216,29 @@ fun SoundSheet(
                         max = SoundState.MACRO_LIMIT_DB,
                     )
 
+                    // The cap is only worth mentioning when it is invisible:
+                    // a preset and a macro pushed the same band, the sum was
+                    // trimmed, and without this the slider would read +6 while
+                    // the band sat at +8 with no explanation for the
+                    // difference.
+                    val capped = state.cappedBandCount()
+                    if (capped > 0) {
+                        Spacer(Modifier.height(Space.s1))
+                        WtText(
+                            text = "Boost limited to keep the sound clean.",
+                            style = Type.caption,
+                            color = p.warn,
+                            modifier = Modifier.clearAndSetSemantics {
+                                contentDescription =
+                                    "Boost limited to keep the sound clean. " +
+                                    (if (capped == 1) "One band has" else "$capped bands have") +
+                                    " reached the ${SoundState.MAX_BOOST_DB.toInt()} decibel " +
+                                    "ceiling, so turning these sliders up further will not " +
+                                    "raise them any more."
+                            },
+                        )
+                    }
+
                     if (state.isCustom) {
                         Spacer(Modifier.height(Space.s1))
                         WtText(
@@ -258,7 +281,9 @@ fun SoundSheet(
                                 spokenNoun = "The band at ${spokenHz(hz)}. " +
                                     "Swipe with one finger to adjust.",
                                 min = EqSettings.MIN_GAIN_DB,
-                                max = EqSettings.MAX_GAIN_DB,
+                                // The right-hand end IS the cap, so the knob
+                                // cannot be dragged somewhere it will not stay.
+                                max = SoundState.MAX_BOOST_DB,
                             )
                         }
 

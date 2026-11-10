@@ -86,18 +86,18 @@ class SoundStateTest {
         assertEquals(-6f, SoundState().withWarmth(-99f).warmthDb, 0f)
     }
 
-    /** A preset plus a macro cannot push a band past the band limit. */
+    /** A preset plus a macro cannot push a band past the boost cap. */
     @Test
     fun presetPlusMacroStaysInsideTheBandRange() {
         val g = SoundState(enabled = true, preset = Preset.Bass).withBass(6f).gains()
         for ((i, v) in g.withIndex()) {
             assertTrue(
                 "band $i was $v",
-                v >= EqSettings.MIN_GAIN_DB && v <= EqSettings.MAX_GAIN_DB,
+                v >= EqSettings.MIN_GAIN_DB && v <= SoundState.MAX_BOOST_DB,
             )
         }
-        // 31 Hz: preset +6, macro +6, so it must be clamped rather than +12.
-        assertEquals(EqSettings.MAX_GAIN_DB, g[0], 1e-4f)
+        // 31 Hz: preset +6, macro +6, so it must be capped rather than +12.
+        assertEquals(SoundState.MAX_BOOST_DB, g[0], 1e-4f)
     }
 
     // ---- presets -------------------------------------------------------
@@ -170,7 +170,7 @@ class SoundStateTest {
     @Test
     fun aBandEditIsClampedToTheBandRange() {
         val s = SoundState(enabled = true).withBandGain(0, 99f)
-        assertEquals(EqSettings.MAX_GAIN_DB, s.gains()[0], 0f)
+        assertEquals(SoundState.MAX_BOOST_DB, s.gains()[0], 0f)
         assertEquals(EqSettings.MIN_GAIN_DB, s.withBandGain(0, -99f).gains()[0], 0f)
     }
 
@@ -216,6 +216,125 @@ class SoundStateTest {
         assertEquals(3f, s.gains()[0], 0f)
         assertEquals(0f, s.gains()[9], 0f)
         assertEquals(EqSettings.BAND_COUNT, s.toEqSettings(rate).bands.size)
+    }
+
+    // ---- the boost cap -------------------------------------------------
+
+    /**
+     * No route through the UI may put a band above the cap.
+     *
+     * Every preset crossed with every extreme of both macros, because the cap
+     * exists for exactly the combination the user can reach by accident: a
+     * preset that already boosts a band and a macro that boosts the same one.
+     */
+    @Test
+    fun noPresetAndMacroCombinationExceedsTheBoostCap() {
+        val macroSteps = listOf(-6f, -3f, 0f, 3f, 6f)
+        var sawTheCapBite = false
+        for (p in Preset.entries) {
+            for (b in macroSteps) {
+                for (w in macroSteps) {
+                    val s = SoundState(enabled = true, preset = p).withBass(b).withWarmth(w)
+                    for ((i, v) in s.gains().withIndex()) {
+                        assertTrue(
+                            "${p.name} bass=$b warmth=$w band $i was $v",
+                            v <= SoundState.MAX_BOOST_DB + 1e-4f,
+                        )
+                        assertTrue(
+                            "${p.name} bass=$b warmth=$w band $i was $v",
+                            v >= EqSettings.MIN_GAIN_DB - 1e-4f,
+                        )
+                    }
+                    if (s.cappedBandCount() > 0) sawTheCapBite = true
+                }
+            }
+        }
+        assertTrue("no combination reached the cap, so this proves nothing", sawTheCapBite)
+    }
+
+    /** A hand-edited band is held to the same ceiling. */
+    @Test
+    fun handEditedBandsObeyTheSameCap() {
+        for (i in 0 until EqSettings.BAND_COUNT) {
+            val s = SoundState(enabled = true).withBandGain(i, 12f)
+            assertEquals(SoundState.MAX_BOOST_DB, s.gains()[i], 1e-4f)
+        }
+        // Including a curve that arrived from storage written by an older build.
+        val stored = SoundState(enabled = true, custom = List(EqSettings.BAND_COUNT) { 12f })
+        assertTrue(stored.gains().all { it <= SoundState.MAX_BOOST_DB + 1e-4f })
+    }
+
+    /** Cuts are deliberately NOT capped: they cost no headroom. */
+    @Test
+    fun cutsKeepTheFullRange() {
+        val s = SoundState(enabled = true).withBandGain(0, -12f)
+        assertEquals(EqSettings.MIN_GAIN_DB, s.gains()[0], 0f)
+        assertEquals(0f, s.toEqSettings(rate).preampDb, 0f)
+    }
+
+    /**
+     * The cap hint fires when the cap is invisible, and not otherwise.
+     *
+     * Zero on a hand-edited curve on purpose: there the slider stopped at the
+     * cap in front of the user, so there is nothing hidden to disclose.
+     */
+    @Test
+    fun theCapHintFiresOnlyWhenTheCapIsHidden() {
+        assertEquals(0, SoundState(enabled = true).cappedBandCount())
+        assertEquals(0, SoundState(enabled = true, preset = Preset.Bass).cappedBandCount())
+
+        val stacked = SoundState(enabled = true, preset = Preset.Bass).withBass(6f)
+        assertTrue(
+            "preset +6 and macro +6 on the same band must report the cap",
+            stacked.cappedBandCount() > 0,
+        )
+
+        assertEquals(0, stacked.withBandGain(0, 8f).cappedBandCount())
+    }
+
+    /**
+     * The point of the cap: the worst reachable headroom cost.
+     *
+     * Before the cap the worst combination cost 15.3 dB, which is a reduction
+     * large enough to make the feature feel like a volume control that also
+     * changes the tone. The cap has to bring that down substantially, and it
+     * must not have cost Flat its freedom or the presets their effect.
+     */
+    @Test
+    fun theWorstReachableHeadroomCostIsBoundedByTheCap() {
+        val macroSteps = listOf(-6f, -3f, 0f, 3f, 6f)
+        var worst = 0f
+        var worstLabel = ""
+        for (p in Preset.entries) {
+            for (b in macroSteps) {
+                for (w in macroSteps) {
+                    val s = SoundState(enabled = true, preset = p).withBass(b).withWarmth(w)
+                    val preamp = s.toEqSettings(rate).preampDb
+                    if (preamp < worst) {
+                        worst = preamp
+                        worstLabel = "${p.name} bass=$b warmth=$w"
+                    }
+                }
+            }
+        }
+        assertTrue(
+            "worst reachable headroom was $worst dB at $worstLabel, " +
+                "which is no better than the 15.3 dB the cap was added to fix",
+            worst > -12f,
+        )
+        assertTrue("the presets must still do something", worst < -5f)
+    }
+
+    /** All ten bands at the cap is the true worst case of the whole feature. */
+    @Test
+    fun tenBandsAtTheCapIsTheAbsoluteWorstCase() {
+        val all = SoundState(enabled = true, custom = List(EqSettings.BAND_COUNT) { 99f })
+        assertTrue(all.gains().all { it == SoundState.MAX_BOOST_DB })
+        val preamp = all.toEqSettings(rate).preampDb
+        // Ten overlapping bands at +8 sum well past 8, which is exactly the
+        // effect the true-peak scan exists to measure rather than assume.
+        assertTrue("absolute worst case was $preamp dB", preamp < -8f)
+        assertTrue("absolute worst case was $preamp dB", preamp > -16f)
     }
 
     // ---- the whole pipeline --------------------------------------------
