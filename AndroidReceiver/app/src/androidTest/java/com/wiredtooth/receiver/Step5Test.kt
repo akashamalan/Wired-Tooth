@@ -12,6 +12,7 @@ import com.wiredtooth.receiver.dsp.Preset
 import com.wiredtooth.receiver.dsp.SoundState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeFalse
 import org.junit.FixMethodOrder
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -360,6 +361,92 @@ class Step5Test {
             sender.stop()
             Thread.sleep(500)
         }
+    }
+
+    // ---- the first-quantum cost of switching EQ on --------------------
+
+    /**
+     * Streams with the equalizer OFF, then switches it ON and records how long
+     * the very first filtered quantum took.
+     *
+     * The two halves of this measurement CANNOT share a process. Measuring
+     * "cold" twice in one process is impossible by definition -- the first
+     * measurement is what warms the runtime for the second. So this is two
+     * test methods, each meaningful only as the first EQ work its process has
+     * ever done, and each is run in its own `am instrument` invocation.
+     *
+     * Both skip rather than fail if something already warmed the path, which
+     * is what happens when the whole class runs in one process after the
+     * screenshot tests have launched the real activity.
+     */
+    private fun measureFirstEqQuantum(label: String, warmFirst: Boolean): Long {
+        val sender = TestSender()
+        sender.start()
+        val receiver = AudioReceiver("127.0.0.1")
+        try {
+            receiver.applySound(SoundState(enabled = false))
+            receiver.start()
+            waitFor(15_000, "connection") { receiver.status().packetsReceived > 200 }
+            waitFor(15_000, "playback to start") { receiver.status().bufferMs > 0 }
+
+            // Five seconds of BYPASS traffic. This compiles the playback loop,
+            // the mixer and the int overload of clampInto -- everything except
+            // the equalizer -- which is exactly the state a real user is in
+            // when they open the sheet and tap the switch.
+            Thread.sleep(5_000)
+            receiver.resetTimings()
+
+            if (warmFirst) {
+                EqWarmup.warm()
+                log("$label warmupTookNanos=${EqWarmup.tookNanos}")
+            }
+
+            receiver.applySound(
+                SoundState(enabled = true, preset = Preset.Bass).withBass(6f),
+            )
+            waitFor(10_000, "the first EQ quantum") { receiver.status().eqOnQuanta > 0 }
+            Thread.sleep(2_000)
+
+            val st = receiver.status()
+            log("$label firstNanos=${st.eqOnFirstNanos} worstNanos=${st.eqOnWorstNanos} " +
+                "avgNanos=${st.eqOnAvgNanos} quanta=${st.eqOnQuanta} warmed=${EqWarmup.warmed}")
+            return st.eqOnFirstNanos
+        } finally {
+            receiver.stop()
+            Thread.sleep(1_000)
+            sender.stop()
+            Thread.sleep(500)
+        }
+    }
+
+    /** Baseline: no warm-up anywhere in this process. */
+    @Test
+    fun f_firstEqQuantumWithoutWarmup() {
+        assumeFalse(
+            "something already warmed the EQ path in this process; " +
+                "run this test on its own",
+            EqWarmup.warmed,
+        )
+        val first = measureFirstEqQuantum("COLD", warmFirst = false)
+        assertTrue("no first quantum was recorded", first > 0)
+    }
+
+    /** The same measurement with [EqWarmup] run first, as the app now does. */
+    @Test
+    fun g_firstEqQuantumWithWarmup() {
+        assumeFalse(
+            "something already warmed the EQ path in this process; " +
+                "run this test on its own",
+            EqWarmup.warmed,
+        )
+        val first = measureFirstEqQuantum("WARM", warmFirst = true)
+        assertTrue("no first quantum was recorded", first > 0)
+        // A quantum is 10ms. The whole point is that the first one no longer
+        // blows through it.
+        assertTrue(
+            "first EQ quantum after warm-up was ${first}ns, still over a 10ms quantum",
+            first < 10_000_000L,
+        )
     }
 
     private fun tapByDesc(fragment: String, label: String) {

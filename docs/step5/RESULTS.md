@@ -106,3 +106,63 @@ thermal behaviour, whether the equalizer sounds correct through wired earbuds,
 whether the 0.5 dB headroom margin is enough against real music rather than
 synthetic tones, the feel of TalkBack gestures on the sliders, and the
 first-quantum JIT spike described above.
+
+---
+
+# Task 1 — EQ warm-up
+
+Same emulator. Each measurement is the FIRST filtered quantum in its own
+process, after five seconds of bypass traffic has already compiled the
+playback loop, the mixer and everything except the equalizer. That is the
+state a real user is in when they open the sheet and tap the switch.
+
+The two halves cannot share a process: measuring "cold" twice is impossible,
+because the first measurement is what warms the runtime for the second. So
+they are two tests, each run in its own `am instrument` invocation.
+
+| | first quantum | worst in 2 s | average over 2 s |
+|---|---|---|---|
+| before (no warm-up) | **24,692,239 ns (24.7 ms)** | 77,890,330 ns (77.9 ms) | 5,458,733 ns (5.46 ms) |
+| after (`EqWarmup`) | **404,726 ns (0.41 ms)** | 909,662 ns (0.91 ms) | 335,132 ns (0.34 ms) |
+
+61x faster on the first quantum, and it drops from 2.5 quanta' worth of budget
+to 4% of one. The whole post-enable transient goes with it: the worst case in
+the first two seconds falls from 77.9 ms to 0.91 ms.
+
+The warm-up itself took **90.5 ms**, once, on a background daemon thread at
+app start, where nothing is playing and nobody is waiting.
+
+An earlier, uncontrolled observation put the cold spike nearer 140 ms. That
+reading came from the Diagnostics panel while the UI and a screenshot capture
+were competing for the same cores. 24.7 ms is the figure from the controlled
+test; both are the same phenomenon measured under different load.
+
+## What it does
+
+A throwaway `EqEngine` — not the real one, whose filter state is part of the
+signal path — runs 100 quanta of silence and then 20 of full-scale signal
+through the exact three calls the playback loop makes, in the same order:
+`Mixing.toFloat`, `EqEngine.process`, `Mixing.clampInto(FloatArray)`. The
+first and last of those run ONLY on the EQ path, so a bypassed stream never
+warms them however long it runs.
+
+The loud burst is a deliberate addition to the brief, which said silent
+blocks. Silence leaves the limiter's gain-reduction branch cold, because with
+a zero signal the limiter never engages — so the first loud passage after
+enabling would still hit uncompiled code. Constructing the `EqSettings` also
+runs the 256-point `FrequencyResponse` scan, which is the cold code the UI
+hits the instant somebody moves a slider.
+
+## Not verified
+
+**The emulator's JIT is not a phone's ART runtime, and this result does not
+transfer.** On a real device the same code may already be ahead-of-time
+compiled from a baseline profile, in which case there was never much of a
+spike and the warm-up is cheap insurance costing 90 ms of background CPU at
+launch. Or the profile may be absent on first install, in which case it is
+doing real work. Which applies to any given phone is not knowable from here,
+and the 61x figure specifically should not be quoted as a phone number.
+
+Also unverified: whether 90 ms of background DSP at launch is noticeable on a
+low-end device, and whether the spike was ever audible through earbuds in the
+first place — nobody has listened to it.

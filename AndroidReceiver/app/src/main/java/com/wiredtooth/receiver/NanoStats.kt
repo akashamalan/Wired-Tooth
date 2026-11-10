@@ -31,10 +31,26 @@ internal class NanoStats {
     var worst = 0L
         private set
 
+    /**
+     * The very first duration recorded since the last [reset].
+     *
+     * Separate from [worst] because they answer different questions. The
+     * worst is usually scheduling noise somewhere in the middle; the first is
+     * specifically the cost of running code that has never run before, which
+     * on Android means ART interpreting it while the JIT decides whether to
+     * compile it. That cost lands at one exact, predictable moment -- the
+     * instant the user switches the equalizer on -- and averaging it away
+     * hides the one glitch they will actually hear.
+     */
+    @Volatile
+    var first = 0L
+        private set
+
     fun record(nanos: Long) {
         if (nanos < 0) return               // a clock that went backwards
-        count.incrementAndGet()
+        val n = count.incrementAndGet()
         total.addAndGet(nanos)
+        if (n == 1L) first = nanos
         if (nanos > worst) worst = nanos
     }
 
@@ -50,5 +66,6 @@ internal class NanoStats {
         count.set(0)
         total.set(0)
         worst = 0
+        first = 0
     }
 }

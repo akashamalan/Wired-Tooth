@@ -63,6 +63,17 @@ class MainActivity : ComponentActivity() {
         // background playback.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        // Compile the equalizer's code before anyone can switch it on.
+        //
+        // On a background thread because it is a second of deliberate DSP
+        // work; on app start because that is the one moment when nothing is
+        // playing and a busy core costs nobody anything. Without it the first
+        // quantum after the user taps Sound is also the first time the runtime
+        // has ever executed the biquad loop, and it ran roughly 140ms against
+        // a 10ms budget -- a dropout at precisely the moment they are
+        // listening for the change.
+        kotlin.concurrent.thread(name = "eq-warmup", isDaemon = true) { EqWarmup.warm() }
+
         val prefilledIp = intent?.data
             ?.takeIf { it.scheme == "wiredtooth" }
             ?.host

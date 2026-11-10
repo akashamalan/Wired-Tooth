@@ -65,6 +65,13 @@ data class ReceiverStatus(
     val eqOnAvgNanos: Long = 0,
     val eqOnWorstNanos: Long = 0,
     val eqOnQuanta: Long = 0,
+    /**
+     * The first EQ quantum since the timers were last cleared.
+     *
+     * The one the user hears when they switch Sound on, and the reason
+     * [EqWarmup] exists.
+     */
+    val eqOnFirstNanos: Long = 0,
     val eqOffAvgNanos: Long = 0,
     val eqOffWorstNanos: Long = 0,
     val eqOffQuanta: Long = 0,
@@ -685,6 +692,7 @@ class AudioReceiver(
             eqOnAvgNanos = eqOnNanos.average,
             eqOnWorstNanos = eqOnNanos.worst,
             eqOnQuanta = eqOnNanos.samples,
+            eqOnFirstNanos = eqOnNanos.first,
             eqOffAvgNanos = eqOffNanos.average,
             eqOffWorstNanos = eqOffNanos.worst,
             eqOffQuanta = eqOffNanos.samples,
