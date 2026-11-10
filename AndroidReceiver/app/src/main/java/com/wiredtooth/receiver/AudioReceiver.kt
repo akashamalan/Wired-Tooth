@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import com.wiredtooth.receiver.dsp.EqEngine
 import com.wiredtooth.receiver.dsp.EqSettings
+import com.wiredtooth.receiver.dsp.SoundState
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -40,6 +41,18 @@ data class ReceiverStatus(
     val clampedSamples: Long = 0,
     /** Auto-preamp currently applied, in dB. Zero or negative. */
     val headroomDb: Float = 0f,
+    /**
+     * The open output rate, or 0 before the first packet.
+     *
+     * Exposed because the UI needs it to show a headroom figure that matches
+     * the one applied: the preamp is derived from the filter response, and the
+     * response depends on the rate. Recomputing in the UI against the same
+     * rate is what lets the number track a slider immediately instead of
+     * waiting for the next status poll.
+     */
+    val sampleRate: Int = 0,
+    /** Filter-state resets forced by a non-finite sample. Should stay 0. */
+    val eqResets: Long = 0,
 )
 
 /** One row of the stream list. */
@@ -128,6 +141,17 @@ class AudioReceiver(
      * would also multiply the cost by the stream count for no audible gain.
      */
     private val eq = EqEngine()
+
+    /**
+     * The user's choice, kept so it can be re-derived on a format change.
+     *
+     * Volatile rather than atomic: it is written by whoever moved the slider
+     * and read by the receive thread on a reopen, and a torn read is not
+     * possible for a reference. The thing the audio thread reads is the
+     * EqSettings snapshot inside [eq], not this.
+     */
+    @Volatile
+    private var sound = SoundState()
 
     /** Counts how often the last line of defence actually fired. */
     private val clampedSamples = AtomicLong()
@@ -377,6 +401,14 @@ class AudioReceiver(
         eq.configure(rate, ch)
         eq.reset()
 
+        // Rebuild the curve against the new rate. The preamp is the negative
+        // of the true peak of the response, and a filter's response depends on
+        // the sample rate, so a format change invalidates a figure computed
+        // for the old rate -- silently, and in the direction of too little
+        // headroom. Recomputing here is also what keeps the number shown in
+        // the UI equal to the gain actually applied.
+        pushSound()
+
         val mask = if (ch == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
         val min = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT)
 
@@ -538,6 +570,31 @@ class AudioReceiver(
     /** The equalizer, for the UI to read and update. */
     fun equalizer(): EqEngine = eq
 
+    /**
+     * Applies the user's sound choice.
+     *
+     * The conversion from choice to filter coefficients happens HERE rather
+     * than in the UI, because it needs the sample rate that is actually open
+     * and the UI does not know it -- the rate comes from the stream and can
+     * change mid-session. Keeping the choice and converting on demand means a
+     * format change re-derives the preamp instead of inheriting a stale one.
+     *
+     * Costs a few thousand trig calls, on the caller's thread, which is the UI
+     * thread reacting to a slider or the receive thread handling a format
+     * change. Never the playback thread: that one only ever reads the finished
+     * number out of the immutable snapshot.
+     */
+    fun applySound(s: SoundState) {
+        sound = s
+        pushSound()
+    }
+
+    fun soundState(): SoundState = sound
+
+    private fun pushSound() {
+        eq.apply(sound.toEqSettings(sampleRate))
+    }
+
     /** Sets one stream's gain. Takes effect on the next 10 ms quantum. */
     fun setVolume(streamId: Int, volume: Float) {
         streams[streamId]?.volume = volume.coerceIn(0f, 1f)
@@ -573,6 +630,8 @@ class AudioReceiver(
             correctionRatio = primary()?.drift?.ratio ?: 1.0,
             clampedSamples = clampedSamples.get(),
             headroomDb = eq.snapshot().let { if (it.enabled && it.autoPreamp) it.preampDb else 0f },
+            sampleRate = sampleRate,
+            eqResets = eq.instabilityResets,
             kbitPerSecond = kbps,
             streams = channels.map {
                 StreamStatus(

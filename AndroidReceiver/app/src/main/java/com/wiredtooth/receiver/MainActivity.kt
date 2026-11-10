@@ -31,6 +31,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.wiredtooth.receiver.dsp.SoundState
 import com.wiredtooth.receiver.ui.ConnectScreen
 import com.wiredtooth.receiver.ui.ConnectError
 import com.wiredtooth.receiver.ui.Device
@@ -83,9 +84,15 @@ private fun App(prefilledIp: String?) {
     var saved by remember { mutableStateOf(SavedStore.load(context)) }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
 
+    // Loaded once, before any receiver exists, so the first stream is already
+    // equalized the way the user left it rather than starting flat and
+    // snapping a moment later.
+    var sound by remember { mutableStateOf(SoundStore.load(context)) }
+
     fun connect(ip: String) {
         receiver?.stop()
         val r = AudioReceiver(ip)
+        r.applySound(sound)
         runCatching { r.start() }
             .onSuccess {
                 receiver = r
@@ -145,6 +152,17 @@ private fun App(prefilledIp: String?) {
                         status = it,
                         route = OutputRoute.unknownDefault,
                         onVolume = { id, v -> receiver?.setVolume(id, v) },
+                        sound = sound,
+                        onSound = { next ->
+                            // Applied first, persisted second. The listener is
+                            // waiting on the first and nobody is waiting on
+                            // the second, and a SharedPreferences commit on
+                            // the main thread between the slider and the
+                            // filters would be audible as lag.
+                            sound = next
+                            receiver?.applySound(next)
+                            SoundStore.save(context, next)
+                        },
                         onDisconnect = {
                             receiver?.stop()
                             receiver = null

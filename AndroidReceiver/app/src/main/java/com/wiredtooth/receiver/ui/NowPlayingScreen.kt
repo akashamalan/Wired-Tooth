@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.width
 import com.wiredtooth.receiver.ReceiverStatus
 import com.wiredtooth.receiver.StreamStatus
+import com.wiredtooth.receiver.dsp.SoundState
 import kotlin.math.roundToInt
 
 /**
@@ -57,10 +58,13 @@ fun NowPlayingScreen(
     route: OutputRoute,
     onDisconnect: () -> Unit,
     onVolume: (Int, Float) -> Unit = { _, _ -> },
+    sound: SoundState = SoundState(),
+    onSound: (SoundState) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val p = LocalPalette.current
     var confirming by remember { mutableStateOf(false) }
+    var soundOpen by remember { mutableStateOf(false) }
 
     Box(modifier.fillMaxSize()) {
         Column(
@@ -94,6 +98,18 @@ fun NowPlayingScreen(
                 StreamList(status.streams, onVolume)
             }
 
+            Spacer(Modifier.height(Space.s3))
+
+            // The entry point into Sound. A row rather than a gear, because
+            // this is the only setting on this screen and hiding the only
+            // setting behind an icon costs a tap and a guess.
+            NavRow(
+                label = "Sound",
+                value = summarise(sound),
+                onClick = { soundOpen = true },
+                spokenLabel = summariseSpoken(sound),
+            )
+
             Spacer(Modifier.weight(1f))
 
             SecondaryButton(
@@ -101,6 +117,19 @@ fun NowPlayingScreen(
                 onClick = { confirming = true },
                 destructive = true,
                 spokenLabel = "Disconnect from ${status.senderIp.replace(".", " dot ")}",
+            )
+        }
+
+        // One sheet at a time. Disconnect wins, because it is the one the
+        // user reached for most recently in every path that can show both.
+        if (soundOpen && !confirming) {
+            SoundSheet(
+                state = sound,
+                sampleRate = status.sampleRate,
+                clampedSamples = status.clampedSamples,
+                eqResets = status.eqResets,
+                onChange = onSound,
+                onDismiss = { soundOpen = false },
             )
         }
 
