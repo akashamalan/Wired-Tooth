@@ -25,6 +25,16 @@ import org.junit.Test
  * there is no spectral leakage to allow for. Every fixture below is
  * therefore asserted to 0.3 dB against a figure that leaves no room for
  * windowing error.
+ *
+ * WHERE THE FIXTURE VALUES CAME FROM. Our own implementation of the RBJ
+ * cookbook's shelving cases, and then cross-checked once against AutoEq's own
+ * coefficient expressions (autoeq/peq.py), transcribed into a throwaway
+ * script outside this repository and run for these six frequencies only. The
+ * two agreed to within 0.0005 dB everywhere -- the residual being the four
+ * decimal places the fixtures are rounded to -- which confirms that their Q
+ * is the cookbook's Q and that our reading of their sign convention was
+ * right. Only the numbers were kept; no code was copied, and no measurement
+ * data was downloaded.
  */
 class ShelfTest {
 

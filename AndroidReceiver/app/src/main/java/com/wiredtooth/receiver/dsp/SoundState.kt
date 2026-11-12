@@ -32,6 +32,16 @@ data class SoundState(
      * way back out.
      */
     val custom: List<Float>? = null,
+    /**
+     * The loaded earbud profile, or null.
+     *
+     * The BASE of the curve, not part of it: the preset and the macros are
+     * layered over the profile rather than mixed into it, because a profile
+     * is a correction for a particular pair of earbuds and the other two are
+     * taste. Keeping them separate is what lets [GainBudget] protect the
+     * profile from the macros rather than averaging the two together.
+     */
+    val profile: ProfileParser.Profile? = null,
 ) {
     /** The ten band gains this state asks for, in the order of [EqSettings.CENTRES_HZ]. */
     fun gains(): List<Float> {
@@ -76,12 +86,30 @@ data class SoundState(
      * Passing the real rate is what keeps the headroom figure shown to the
      * user equal to the gain actually applied.
      */
-    fun toEqSettings(sampleRate: Int): EqSettings = EqSettings(
-        enabled = enabled,
-        autoPreamp = true,
-        limiter = true,
-        bands = EqSettings.fromGains(gains()),
-        sampleRateForPreamp = if (sampleRate > 0) sampleRate else 48000,
+    fun toEqSettings(sampleRate: Int): EqSettings {
+        val rate = if (sampleRate > 0) sampleRate else 48000
+        return EqSettings(
+            enabled = enabled,
+            autoPreamp = true,
+            limiter = true,
+            bands = layered(rate).bands,
+            sampleRateForPreamp = rate,
+        )
+    }
+
+    /**
+     * The profile and the macro curve, fitted into the shared gain budget.
+     *
+     * Separate from [toEqSettings] because the sheet needs more than the
+     * bands: it has to say whether the profile was reduced, whether the
+     * macros were squeezed, and how many filters hit the per-filter ceiling.
+     * Computing it twice would risk the explanation and the filters coming
+     * from two different answers.
+     */
+    fun layered(sampleRate: Int): GainBudget.Layered = GainBudget.layer(
+        profile?.filters ?: emptyList(),
+        gains(),
+        if (sampleRate > 0) sampleRate else 48000,
     )
 
     val isCustom: Boolean get() = custom != null
@@ -104,6 +132,25 @@ data class SoundState(
 
     /** Back to the preset and macros, discarding hand edits. */
     fun withoutCustom(): SoundState = copy(custom = null)
+
+    /**
+     * Loads a profile, which resets the preset to Flat and keeps the macros.
+     *
+     * WHY THE PRESET GOES AND THE MACROS STAY. A profile is a complete
+     * starting curve, which is exactly what a preset is, so keeping both
+     * would stack two opinions about the same thing and the result would
+     * sound like neither. The macros are different: they are a nudge the user
+     * applies to whatever the base happens to be, so carrying them over means
+     * "a bit more bass than standard" still means that after the profile
+     * arrives. A hand-edited curve goes with the preset, because once a
+     * profile is the base, a curve frozen from the old base describes nothing.
+     */
+    fun withProfile(p: ProfileParser.Profile?): SoundState =
+        copy(profile = p?.takeIf { !it.isEmpty }, preset = Preset.Flat, custom = null)
+
+    fun withoutProfile(): SoundState = copy(profile = null)
+
+    val hasProfile: Boolean get() = profile != null
 
     companion object {
         /**

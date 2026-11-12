@@ -28,7 +28,7 @@ package com.wiredtooth.receiver.dsp
  * up to twenty sections; that is nothing next to a frame of UI work and far
  * too much inside a 10 ms render quantum.
  */
-internal object GainBudget {
+object GainBudget {
 
     /**
      * The most a profile's own combined response may peak at, in dB.
@@ -117,11 +117,12 @@ internal object GainBudget {
 
         // 2. The profile against its own ceiling only. Nothing about the
         //    macros enters here, which is the whole point of the priority.
-        val profileScale =
-            if (clamped.isEmpty()) 1.0
-            else largestScale(PROFILE_PEAK_CEILING_DB, sampleRate) { s ->
-                scaled(clamped, s)
-            }
+        //
+        //    Memoised because that independence makes it safe to: dragging a
+        //    slider cannot change this answer, so recomputing it on every
+        //    frame of a drag would be up to twenty-four magnitude scans spent
+        //    arriving at the number we already had.
+        val profileScale = profileScale(clamped, sampleRate)
         val fittedProfile = scaled(clamped, profileScale)
 
         // 3. The macro layer gets what is left of the total.
@@ -138,6 +139,35 @@ internal object GainBudget {
             macroScale = macroScale,
             cappedFilterCount = capped,
         )
+    }
+
+    private class ProfileMemo(
+        val profile: List<EqBand>,
+        val sampleRate: Int,
+        val scale: Double,
+    )
+
+    /**
+     * One-entry cache of the last profile scale.
+     *
+     * Volatile and immutable rather than synchronised: the audio thread reads
+     * settings through this path once when the output is opened, and a lock
+     * shared with the UI thread is the one thing that must never appear
+     * anywhere near the render path. A race here costs a recomputation, which
+     * is correct and merely slower.
+     */
+    @Volatile
+    private var memo: ProfileMemo? = null
+
+    private fun profileScale(profile: List<EqBand>, sampleRate: Int): Double {
+        if (profile.isEmpty()) return 1.0
+        val cached = memo
+        if (cached != null && cached.sampleRate == sampleRate && cached.profile == profile) {
+            return cached.scale
+        }
+        val s = largestScale(PROFILE_PEAK_CEILING_DB, sampleRate) { k -> scaled(profile, k) }
+        memo = ProfileMemo(profile, sampleRate, s)
+        return s
     }
 
     /** Every band's gain multiplied by [scale]. Shape preserved, depth reduced. */

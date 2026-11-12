@@ -3,6 +3,7 @@ package com.wiredtooth.receiver
 import android.content.Context
 import com.wiredtooth.receiver.dsp.EqSettings
 import com.wiredtooth.receiver.dsp.Preset
+import com.wiredtooth.receiver.dsp.ProfileParser
 import com.wiredtooth.receiver.dsp.SoundState
 
 /**
@@ -31,6 +32,7 @@ internal object SoundStore {
     private const val KEY_BASS = "bass"
     private const val KEY_WARMTH = "warmth"
     private const val KEY_CUSTOM = "custom"
+    private const val KEY_PROFILE = "profile"
 
     private fun prefs(c: Context) = c.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
@@ -41,6 +43,16 @@ internal object SoundStore {
             ?.mapNotNull { it.trim().toFloatOrNull() }
             ?.takeIf { it.size == EqSettings.BAND_COUNT }
 
+        // Stored as text in our own format and re-parsed, not as a band list.
+        // The parser is the one thing that has already been proved to survive
+        // arbitrary input, so routing a stored value back through it means a
+        // preference file corrupted by anything at all degrades to "no
+        // profile" instead of to a crash on launch.
+        val profile = p.getString(KEY_PROFILE, null)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { ProfileParser.parse(it) }
+            ?.takeIf { !it.isEmpty }
+
         return SoundState(
             enabled = p.getBoolean(KEY_ENABLED, false),
             preset = Preset.byName(p.getString(KEY_PRESET, null)),
@@ -49,6 +61,7 @@ internal object SoundStore {
             warmthDb = p.getFloat(KEY_WARMTH, 0f)
                 .coerceIn(-SoundState.MACRO_LIMIT_DB, SoundState.MACRO_LIMIT_DB),
             custom = custom,
+            profile = profile,
         )
     }
 
@@ -59,6 +72,11 @@ internal object SoundStore {
             .putFloat(KEY_BASS, s.bassDb)
             .putFloat(KEY_WARMTH, s.warmthDb)
             .putString(KEY_CUSTOM, s.custom?.joinToString(",") ?: "")
+            // Written in the canonical export form rather than the bytes the
+            // user picked: it is a tenth of the size, already clamped to this
+            // engine's limits, and round-tripping through the writer on every
+            // save is what keeps the writer honest.
+            .putString(KEY_PROFILE, s.profile?.let { ProfileParser.export(it) } ?: "")
             .apply()
     }
 }
