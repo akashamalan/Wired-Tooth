@@ -8,6 +8,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
+import com.wiredtooth.receiver.dsp.Preset
 import com.wiredtooth.receiver.dsp.ProfileParser
 import com.wiredtooth.receiver.dsp.SoundState
 import org.junit.Assert.assertEquals
@@ -106,6 +107,15 @@ class Step6Test {
             if (findByDesc(fragment, 700) != null) return true
         }
         return findByDesc(fragment, 1_000) != null
+    }
+
+    /** Scrolls either way looking for on-screen TEXT rather than a description. */
+    private fun scrollToText(fragment: String): Boolean {
+        fun here() = device.wait(Until.findObject(By.textContains(fragment)), 600) != null
+        if (here()) return true
+        repeat(5) { swipeContentDown(); if (here()) return true }
+        repeat(9) { swipeContentUp(); if (here()) return true }
+        return here()
     }
 
     /** True if any text on screen contains this fragment. */
@@ -237,8 +247,13 @@ class Step6Test {
     }
 
     private fun pasteAndRead(text: String) {
-        tapByDesc("Paste profile text", "the Paste text disclosure")
-        Thread.sleep(600)
+        // The disclosure keeps its state, so a second paste in the same
+        // session finds it already open -- and tapping it then would close
+        // it. Open it only when the field is not already there.
+        if (!scrollToDesc("Profile text")) {
+            tapByDesc("Paste profile text", "the Paste text disclosure")
+            Thread.sleep(600)
+        }
         val field = findByDesc("Profile text", 4_000)
             ?: throw AssertionError("the paste field must be findable")
         field.text = text
@@ -420,6 +435,91 @@ class Step6Test {
                 packetsAfter > packetsBefore + 100,
             )
             log("COMPARE packets $packetsBefore -> $packetsAfter")
+        } finally {
+            sender.stop()
+            Thread.sleep(500)
+        }
+    }
+
+    // ---- (4) screenshots in both palettes -------------------------------
+
+    /**
+     * The four states that matter, captured in whichever palette the system
+     * is currently in. Run twice, once per palette.
+     *
+     * Both palettes because the last two interface bugs in this project were
+     * each invisible in one of them: a slider track drawn in the sheet's own
+     * background colour vanished in dark and was pure white on white in
+     * light. A screenshot of one palette is half a check.
+     *
+     * The suffix comes from an instrumentation argument rather than being
+     * read off the configuration, so the file name records what the runner
+     * intended and a mismatch shows up as two identical-looking images
+     * rather than as a silently mislabelled one.
+     */
+    @Test
+    fun f_screenshotsInThisPalette() {
+        val suffix = InstrumentationRegistry.getArguments().getString("suffix") ?: "unknown"
+        device.executeShellCommand("logcat -c")
+
+        // A profile that trips all three hints at once: every filter asks
+        // for far more than the per-filter ceiling, the profile as a whole
+        // peaks well past its own ceiling, and the macros are at maximum so
+        // they are the ones squeezed out of what is left.
+        val nl = 10.toChar().toString()
+        val hot = StringBuilder("luma-profile 1" + nl + "name: All Three Hints" + nl)
+        for (i in 0 until 10) {
+            val hz = 20.0 * Math.pow(500.0, i / 9.0)
+            hot.append("peak ").append(String.format("%.2f", hz)).append(" 0.70 99").append(nl)
+        }
+        val ctx = instr.targetContext
+        SoundStore.save(
+            ctx,
+            SoundState(
+                enabled = true, preset = Preset.Bass, bassDb = 6f, warmthDb = 6f,
+            ).withProfile(ProfileParser.parse(hot.toString()))
+                .copy(preset = Preset.Bass, bassDb = 6f, warmthDb = 6f),
+        )
+
+        val sender = TestSender()
+        sender.start()
+        try {
+            startStream(sender)
+            tapByDesc("Sound", "the Sound row")
+            Thread.sleep(1_200)
+
+            // All three hints live on the main surface, above Advanced.
+            assertTrue("hint 1 missing", scrollToText("Boost limited"))
+            shoot("30-hints-$suffix")
+            val hintsOk = textPresent("Boost limited to keep the sound clean") &&
+                textPresent("Profile strength reduced to keep the sound clean") &&
+                textPresent("Bass and Warmth limited by your profile")
+            log("HINTS all three visible in $suffix: $hintsOk")
+            assertTrue("all three hints must be on screen at once", hintsOk)
+            assertNoCrash("the hint stack")
+
+            // Advanced numbers.
+            tapByDesc("Advanced", "the Advanced disclosure")
+            Thread.sleep(800)
+            assertTrue("strength row missing", scrollToDesc("Profile strength is"))
+            shoot("31-advanced-numbers-$suffix")
+            assertNoCrash("the Advanced numbers")
+
+            // The preview.
+            pasteAndRead(VALID_PROFILE)
+            assertTrue("preview missing", textPresent("Use this profile?"))
+            shoot("32-preview-$suffix")
+            assertNoCrash("the preview")
+            tapByDesc("Cancel. Leaves your sound settings", "the Cancel button")
+            Thread.sleep(900)
+
+            // The error.
+            pasteAndRead(JUNK)
+            assertTrue("error missing", textPresent("Cannot use that file"))
+            shoot("33-error-$suffix")
+            assertNoCrash("the error sheet")
+            tapByDesc("Close. Your sound settings", "the Close button")
+            Thread.sleep(700)
         } finally {
             sender.stop()
             Thread.sleep(500)
