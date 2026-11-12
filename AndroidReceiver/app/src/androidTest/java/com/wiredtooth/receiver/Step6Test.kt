@@ -8,7 +8,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
+import com.wiredtooth.receiver.dsp.ProfileParser
+import com.wiredtooth.receiver.dsp.SoundState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.FixMethodOrder
@@ -58,32 +61,49 @@ class Step6Test {
 
     /** Scrolls the sheet looking for a description, then taps it. */
     private fun tapByDesc(fragment: String, label: String) {
-        repeat(5) {
-            val o = device.wait(Until.findObject(By.descContains(fragment)), 2_500)
-            if (o != null) {
-                o.click()
-                Thread.sleep(500)
-                return
-            }
-            val w = device.displayWidth
-            val h = device.displayHeight
-            device.swipe(w / 2, (h * 0.78).toInt(), w / 2, (h * 0.45).toInt(), 20)
-            Thread.sleep(500)
+        if (!scrollToDesc(fragment)) {
+            throw AssertionError("$label must be findable by description")
         }
-        throw AssertionError("$label must be findable by description")
+        val o = findByDesc(fragment, 2_000)
+            ?: throw AssertionError("$label vanished between finding and tapping")
+        o.click()
+        Thread.sleep(500)
+    }
+
+    private fun swipeContentUp() {
+        val w = device.displayWidth
+        val h = device.displayHeight
+        device.swipe(w / 2, (h * 0.78).toInt(), w / 2, (h * 0.45).toInt(), 20)
+        Thread.sleep(450)
+    }
+
+    private fun swipeContentDown() {
+        val w = device.displayWidth
+        val h = device.displayHeight
+        device.swipe(w / 2, (h * 0.45).toInt(), w / 2, (h * 0.78).toInt(), 20)
+        Thread.sleep(450)
     }
 
     private fun findByDesc(fragment: String, timeoutMs: Long = 2_500) =
         device.wait(Until.findObject(By.descContains(fragment)), timeoutMs)
 
-    /** Scrolls until a description appears, without tapping it. */
+    /**
+     * Scrolls until a description appears, without tapping it.
+     *
+     * Searches upward before downward, because the sheet is long and the
+     * caller may be anywhere in it: Headroom sits above Advanced, and
+     * Earbud correction sits below it, so a one-directional search finds
+     * whichever half it happens to start in and fails on the other.
+     */
     private fun scrollToDesc(fragment: String): Boolean {
+        if (findByDesc(fragment, 1_200) != null) return true
         repeat(5) {
-            if (findByDesc(fragment, 1_500) != null) return true
-            val w = device.displayWidth
-            val h = device.displayHeight
-            device.swipe(w / 2, (h * 0.78).toInt(), w / 2, (h * 0.45).toInt(), 20)
-            Thread.sleep(500)
+            swipeContentDown()
+            if (findByDesc(fragment, 700) != null) return true
+        }
+        repeat(9) {
+            swipeContentUp()
+            if (findByDesc(fragment, 700) != null) return true
         }
         return findByDesc(fragment, 1_000) != null
     }
@@ -185,6 +205,221 @@ class Step6Test {
             assertNoCrash("the paste field")
 
             log("RENDER all five surfaces rendered with no crash")
+        } finally {
+            sender.stop()
+            Thread.sleep(500)
+        }
+    }
+
+
+    /** The headroom row's spoken description, which carries the number. */
+    private fun headroomSpoken(): String {
+        scrollToDesc("Headroom")
+        val o = findByDesc("Headroom", 3_000)
+            ?: throw AssertionError("the Headroom row must be findable")
+        return o.contentDescription ?: ""
+    }
+
+    /** Writes a profile straight into the store, before the activity starts. */
+    private fun seedProfile(source: String?) {
+        val ctx = instr.targetContext
+        val base = SoundState(enabled = true, bassDb = 0f, warmthDb = 0f)
+        val state = if (source == null) base
+        else base.withProfile(ProfileParser.parse(source))
+        SoundStore.save(ctx, state)
+    }
+
+    private fun openSoundAdvanced() {
+        tapByDesc("Sound", "the Sound row")
+        Thread.sleep(800)
+        tapByDesc("Advanced", "the Advanced disclosure")
+        Thread.sleep(800)
+    }
+
+    private fun pasteAndRead(text: String) {
+        tapByDesc("Paste profile text", "the Paste text disclosure")
+        Thread.sleep(600)
+        val field = findByDesc("Profile text", 4_000)
+            ?: throw AssertionError("the paste field must be findable")
+        field.text = text
+        Thread.sleep(600)
+        tapByDesc("Read the pasted text", "the Read this text button")
+        Thread.sleep(1_200)
+    }
+
+    // ---- (3) the UI, driven through the accessibility tree --------------
+
+    /**
+     * Paste a valid profile, see the preview, apply it, and watch the
+     * headroom move.
+     *
+     * The headroom assertion is the one that matters: a name on screen only
+     * proves the UI stored something, while a changed headroom proves the
+     * filters the audio thread is running actually changed.
+     */
+    @Test
+    fun b_pasteValidProfileShowsPreviewThenApplies() {
+        device.executeShellCommand("logcat -c")
+        seedProfile(null)
+        val sender = TestSender()
+        sender.start()
+        try {
+            startStream(sender)
+            openSoundAdvanced()
+
+            val before = headroomSpoken()
+            log("HEADROOM before: $before")
+
+            pasteAndRead(VALID_PROFILE)
+
+            // The preview, not the sound.
+            assertTrue("the preview must appear", textPresent("Use this profile?"))
+            assertTrue("the profile name must show", textPresent("Bench Test Buds"))
+            assertTrue("3 filters must be stated", textPresent("3 filter"))
+            assertTrue(
+                "the preview must say nothing has changed yet",
+                textPresent("Nothing changes until you apply"),
+            )
+            shoot("20-preview")
+            assertNoCrash("the preview")
+
+            // Still unchanged behind the preview.
+            tapByDesc("Apply this profile", "the Apply button")
+            Thread.sleep(1_500)
+            assertNoCrash("applying")
+
+            val after = headroomSpoken()
+            log("HEADROOM after: $after")
+            assertNotEquals("the headroom must change when a profile is applied", before, after)
+
+            assertTrue(
+                "the profile must now be reported as loaded",
+                scrollToDesc("Bench Test Buds"),
+            )
+            shoot("21-applied")
+        } finally {
+            sender.stop()
+            Thread.sleep(500)
+        }
+    }
+
+    /**
+     * Junk gets plain words and leaves the profile alone.
+     *
+     * The second half is the important one: an import that fails must not
+     * also destroy what was already working.
+     */
+    @Test
+    fun c_pasteJunkShowsErrorAndKeepsTheProfile() {
+        device.executeShellCommand("logcat -c")
+        seedProfile(VALID_PROFILE)
+        val sender = TestSender()
+        sender.start()
+        try {
+            startStream(sender)
+            openSoundAdvanced()
+            val before = headroomSpoken()
+
+            pasteAndRead(JUNK)
+
+            assertTrue("the error must appear", textPresent("Cannot use that file"))
+            assertTrue(
+                "the error must be in plain words",
+                textPresent("Nothing usable in this text"),
+            )
+            assertTrue(
+                "the error must say the settings are untouched",
+                textPresent("Your sound settings have not changed"),
+            )
+            shoot("22-error")
+            assertNoCrash("the error sheet")
+
+            tapByDesc("Close. Your sound settings", "the Close button")
+            Thread.sleep(1_000)
+
+            assertEquals(
+                "a failed import must not change the sound",
+                before, headroomSpoken(),
+            )
+            assertTrue(
+                "the original profile must still be loaded",
+                scrollToDesc("Bench Test Buds"),
+            )
+        } finally {
+            sender.stop()
+            Thread.sleep(500)
+        }
+    }
+
+    /** Remove asks first, then clears. */
+    @Test
+    fun d_removeProfileConfirmsThenClears() {
+        device.executeShellCommand("logcat -c")
+        seedProfile(VALID_PROFILE)
+        val sender = TestSender()
+        sender.start()
+        try {
+            startStream(sender)
+            openSoundAdvanced()
+            assertTrue("profile should start loaded", scrollToDesc("Bench Test Buds"))
+
+            tapByDesc("Remove the earbud profile", "the Remove button")
+            Thread.sleep(1_000)
+            assertTrue("the confirm must appear", textPresent("Remove the profile?"))
+            shoot("23-remove-confirm")
+            assertNoCrash("the remove confirm")
+
+            tapByDesc("Remove. The curve goes back", "the confirm Remove button")
+            Thread.sleep(1_200)
+
+            assertTrue(
+                "the profile must be gone",
+                scrollToDesc("No earbud profile is loaded"),
+            )
+            assertNoCrash("removing")
+            shoot("24-removed")
+        } finally {
+            sender.stop()
+            Thread.sleep(500)
+        }
+    }
+
+    /**
+     * Compare still works with a profile loaded, over the whole chain.
+     *
+     * The profile is the base of a twenty-section cascade, so this is the
+     * path where a blend between the dry copy and the filtered buffer has
+     * the most to go wrong. Checked from the sender's side as well, because
+     * a receiver that has stopped consuming would look fine on screen.
+     */
+    @Test
+    fun e_compareWorksWithAProfileLoaded() {
+        device.executeShellCommand("logcat -c")
+        seedProfile(VALID_PROFILE)
+        val sender = TestSender()
+        sender.start()
+        try {
+            startStream(sender)
+            tapByDesc("Sound", "the Sound row")
+            Thread.sleep(1_000)
+
+            val packetsBefore = sender.audioPacketsSent.get()
+            repeat(3) {
+                tapByDesc("Original", "the Original chip")
+                Thread.sleep(700)
+                tapByDesc("Equalized", "the Equalized chip")
+                Thread.sleep(700)
+            }
+            shoot("25-compare-with-profile")
+            assertNoCrash("comparing with a profile")
+
+            val packetsAfter = sender.audioPacketsSent.get()
+            assertTrue(
+                "the stream must keep flowing through Compare: " +
+                    "$packetsBefore then $packetsAfter",
+                packetsAfter > packetsBefore + 100,
+            )
+            log("COMPARE packets $packetsBefore -> $packetsAfter")
         } finally {
             sender.stop()
             Thread.sleep(500)
