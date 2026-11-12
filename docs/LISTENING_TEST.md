@@ -224,6 +224,103 @@ NOTES:  (and anything you would cut, move, or reword)
 
 ---
 
+### 7. Importing a profile you made
+
+An earbud profile is a correction for one particular pair of earbuds. It
+becomes the *base* of the curve; Bass and Warmth still work on top of it.
+Nothing here has been heard — the emulator can show the numbers move, not
+that the result sounds like anything.
+
+**First, write yourself a file.** Any text editor, saved as `.txt`. This is a
+starting point to edit by ear, not a correction for anything in particular:
+
+```
+luma-profile 1
+name: My earbuds
+lowshelf 105 0.70 -3.0
+peak 2800 1.20 2.0
+highshelf 10000 0.70 1.5
+```
+
+**Do this.** **Sound → Advanced → Earbud correction → Import file**. Pick the
+file. Read the preview, then tap **Apply**.
+
+**What to judge.**
+
+- Did the file picker open without asking for any permission?
+- Does the preview tell you enough to decide — name, filter count, notes?
+- After Apply: does the name appear under "Sound" at the top of the sheet?
+- Does the **Headroom** number change? Write down both values.
+- Now move **Bass**. It should still do something: the macros work on top of
+  the profile, not instead of it.
+
+```
+[ ] PASS   [ ] FAIL
+
+Headroom before: ____________   after: ____________
+
+NOTES:
+
+
+
+```
+
+---
+
+### 8. Importing something that is not a profile
+
+The parser has been fuzzed hard, but "it did not crash" and "it told you
+something useful" are different claims and only the first has been tested.
+
+**Do this.** Import any file that is not a profile — a photo, a PDF, a song.
+Then use **Paste text** and paste in a sentence of ordinary prose.
+
+**What to judge.**
+
+- Does it refuse in plain words, or in jargon?
+- Does it say clearly that your current settings were *not* changed?
+- Check: is the profile from item 7 still loaded, and does the sound still
+  match what it was before you tried?
+
+```
+[ ] PASS   [ ] FAIL
+
+What it said for the non-text file: ____________________________
+
+What it said for the prose: ____________________________
+
+NOTES:
+
+
+
+```
+
+---
+
+### 9. Removing the profile
+
+**Do this.** **Sound → Advanced → Earbud correction → Remove profile**.
+
+**What to judge.**
+
+- Does it ask before removing?
+- Afterwards, does it read "None", and has the name gone from the top of the
+  sheet?
+- Did your **Bass** and **Warmth** settings survive? They are supposed to.
+- Does the sound go back to what it was before item 7? Play the same passage
+  and compare.
+
+```
+[ ] PASS   [ ] FAIL
+
+NOTES:
+
+
+
+```
+
+---
+
 ## Afterwards
 
 Three things are worth more than the boxes:
@@ -243,4 +340,8 @@ Three things are worth more than the boxes:
 - Real Wi-Fi conditions. If you use a hotspot, you are on the easiest possible
   network.
 - Any other phone, any other earbuds, or Bluetooth.
-- The light colour scheme. Everything so far has been looked at in dark mode.
+- The light colour scheme on a real screen. It has now been checked in the
+  emulator in both palettes, but never on a phone outdoors.
+- Whether an imported correction actually suits the earbuds it was made for.
+  Only your ears can answer that; the app can only prove it applied what the
+  file asked for.
