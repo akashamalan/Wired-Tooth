@@ -172,6 +172,9 @@ class Step6Test {
     @Test
     fun a_everyNewSurfaceRendersWithoutCrashing() {
         device.executeShellCommand("logcat -c")
+        // Starts from no profile whatever an earlier test left behind, so
+        // this one does not depend on the order it runs in.
+        seedProfile(null)
         val sender = TestSender()
         sender.start()
         try {
