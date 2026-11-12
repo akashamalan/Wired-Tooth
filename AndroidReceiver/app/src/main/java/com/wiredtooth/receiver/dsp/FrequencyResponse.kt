@@ -95,8 +95,9 @@ internal object FrequencyResponse {
 
         val coef = DoubleArray(bands.size * Biquad.COEFFS)
         for (i in bands.indices) {
-            Biquad.designPeaking(
+            Biquad.design(
                 coef, i * Biquad.COEFFS,
+                bands[i].type,
                 bands[i].frequencyHz.toDouble(),
                 bands[i].q.toDouble(),
                 bands[i].gainDb.toDouble(),

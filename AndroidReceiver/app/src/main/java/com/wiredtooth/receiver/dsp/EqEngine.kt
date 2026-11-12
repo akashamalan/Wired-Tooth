@@ -5,9 +5,9 @@ import kotlin.math.abs
 import kotlin.math.pow
 
 /**
- * The equalizer. Ten peaking bands per channel, an automatic preamp in front
- * and a limiter behind, running on the playback thread with no allocation and
- * no locks.
+ * The equalizer. Up to [EqSettings.MAX_BANDS] peaking or shelving sections
+ * per channel, an automatic preamp in front and a limiter behind, running on
+ * the playback thread with no allocation and no locks.
  *
  * HOW SETTINGS CROSS THREADS. The UI writes a whole [EqSettings] into an
  * atomic reference; the audio thread reads it once per call. There is no lock
@@ -29,6 +29,25 @@ import kotlin.math.pow
  * takes about a tenth of a second across roughly 150 redesigns. Bands whose
  * smoothed parameters did not move are not redesigned at all, so a curve at
  * rest costs nothing beyond the filtering itself.
+ *
+ * WHY IDENTITY SECTIONS ARE DROPPED, AND WHY THAT IS BIT-EXACT. Twenty
+ * sections are allocated but a curve rarely uses them all, and at 0 dB a
+ * section is the identity filter: b0 = 1 and every other coefficient 0. Feed
+ * that through the difference equation below and the state empties itself
+ * within two samples --
+ *
+ *     y  = x + s0      s0 = s1      s1 = 0
+ *
+ * so after the first sample s1 is 0, after the second s0 is 0 too, and from
+ * then on y = x with both state words at exactly zero. A section in that
+ * condition contributes nothing and holds nothing, so removing it from the
+ * cascade changes not one bit of the output. [FLUSH_SAMPLES] is that
+ * two-sample wait, counted in samples rather than control blocks because the
+ * last block of a buffer can be shorter than one.
+ *
+ * The saving is real in both directions: a profile loaded with six filters
+ * and the macros at flat runs six sections, not twenty, and not the ten it
+ * would have run before profiles existed.
  */
 class EqEngine {
 
@@ -40,9 +59,29 @@ class EqEngine {
     private var coef = DoubleArray(0)
     private var state = DoubleArray(0)
 
-    private val curGain = DoubleArray(EqSettings.BAND_COUNT)
-    private val curFreq = DoubleArray(EqSettings.BAND_COUNT)
-    private val curQ = DoubleArray(EqSettings.BAND_COUNT)
+    private val curGain = DoubleArray(EqSettings.MAX_BANDS)
+    private val curFreq = DoubleArray(EqSettings.MAX_BANDS)
+    private val curQ = DoubleArray(EqSettings.MAX_BANDS)
+    private val curType = arrayOfNulls<BandType>(EqSettings.MAX_BANDS)
+
+    /**
+     * The sections the render loop runs, in cascade order, and how many.
+     *
+     * Rebuilt once per control block, which is where the gain smoothing has
+     * just decided which bands are at zero. Ascending order always, because
+     * cascaded biquads commute in exact arithmetic but not in floating point,
+     * and a cascade that silently reorders itself would make the regression
+     * tests non-reproducible.
+     */
+    private val activeBands = IntArray(EqSettings.MAX_BANDS)
+    private var activeCount = 0
+
+    /**
+     * Samples each band has been processed for since its gain reached zero,
+     * capped at [FLUSH_SAMPLES]. Reaching the cap is what makes it safe to
+     * drop the band from the cascade.
+     */
+    private val flushedSamples = IntArray(EqSettings.MAX_BANDS)
 
     private var curPreampDb = 0.0
     private var preampGain = 1.0
@@ -73,8 +112,8 @@ class EqEngine {
 
         this.sampleRate = sampleRate
         this.channels = channels
-        coef = DoubleArray(EqSettings.BAND_COUNT * Biquad.COEFFS)
-        state = DoubleArray(EqSettings.BAND_COUNT * channels * 2)
+        coef = DoubleArray(EqSettings.MAX_BANDS * Biquad.COEFFS)
+        state = DoubleArray(EqSettings.MAX_BANDS * channels * 2)
         limiter.configure(sampleRate)
         reset()
     }
@@ -92,6 +131,9 @@ class EqEngine {
      */
     fun reset() {
         java.util.Arrays.fill(state, 0.0)
+        // Every state word is zero, so any band that is at 0 dB is already in
+        // the flushed condition and can be dropped on the very first block.
+        java.util.Arrays.fill(flushedSamples, FLUSH_SAMPLES)
         limiter.reset()
         snapNext = true
     }
@@ -127,19 +169,20 @@ class EqEngine {
             updateControl(s)
 
             val pre = preampGain
-            val bands = EqSettings.BAND_COUNT
+            val active = activeCount
             var f = 0
             while (f < block) {
                 val base = (frame + f) * channels
                 var c = 0
                 while (c < channels) {
                     var x = samples[base + c].toDouble() * pre
-                    var b = 0
-                    while (b < bands) {
+                    var i = 0
+                    while (i < active) {
+                        val b = activeBands[i]
                         x = Biquad.processSample(
                             x, coef, b * Biquad.COEFFS, state, (b * channels + c) * 2,
                         )
-                        b++
+                        i++
                     }
                     samples[base + c] = x.toFloat()
                     c++
@@ -148,6 +191,7 @@ class EqEngine {
                 f++
             }
 
+            noteBlockProcessed(block)
             guardAgainstInstability(samples, (frame + block - 1) * channels)
             frame += block
         }
@@ -187,13 +231,20 @@ class EqEngine {
         val maxQStep = if (snapNext) Double.MAX_VALUE else MAX_Q_PER_SEC * dt
         val maxOctaves = if (snapNext) Double.MAX_VALUE else MAX_OCTAVES_PER_SEC * dt
 
+        activeCount = 0
         var b = 0
-        while (b < EqSettings.BAND_COUNT) {
+        while (b < EqSettings.MAX_BANDS) {
             val band = s.bands.getOrNull(b)
             val targetGain = (band?.gainDb ?: 0f).toDouble()
                 .coerceIn(EqSettings.MIN_GAIN_DB.toDouble(), EqSettings.MAX_GAIN_DB.toDouble())
-            val targetFreq = (band?.frequencyHz ?: EqSettings.CENTRES_HZ[b]).toDouble()
+            // A band past the end of the list is on its way out: its gain
+            // glides to zero, and holding its frequency where it already was
+            // keeps that glide from also sweeping the filter across the
+            // spectrum on the way down.
+            val targetFreq = band?.frequencyHz?.toDouble()
+                ?: if (curFreq[b] > 0.0) curFreq[b] else ABSENT_HZ
             val targetQ = (band?.q ?: EqSettings.DEFAULT_Q).toDouble()
+            val targetType = band?.type ?: BandType.Peaking
 
             val oldGain = curGain[b]
             val oldFreq = curFreq[b]
@@ -204,12 +255,29 @@ class EqEngine {
             curFreq[b] = approachByRatio(oldFreq, targetFreq, maxOctaves)
 
             if (snapNext ||
-                curGain[b] != oldGain || curFreq[b] != oldFreq || curQ[b] != oldQ
+                curGain[b] != oldGain || curFreq[b] != oldFreq || curQ[b] != oldQ ||
+                curType[b] != targetType
             ) {
-                Biquad.designPeaking(
-                    coef, b * Biquad.COEFFS,
+                // The shape changes the instant the type does. There is no
+                // smoothing between shapes, because there is no meaningful
+                // half-way filter between a peak and a shelf -- but a type
+                // only ever changes when a profile is loaded or cleared, and
+                // the band's gain is smoothed across that same moment, so the
+                // audible transition is the gain's and not the shape's.
+                curType[b] = targetType
+                Biquad.design(
+                    coef, b * Biquad.COEFFS, targetType,
                     curFreq[b], curQ[b], curGain[b], sampleRate.toDouble(),
                 )
+            }
+
+            if (curGain[b] != 0.0) {
+                flushedSamples[b] = 0
+                activeBands[activeCount++] = b
+            } else if (flushedSamples[b] < FLUSH_SAMPLES) {
+                // At zero but not yet emptied: keep running it precisely so
+                // that it does empty.
+                activeBands[activeCount++] = b
             }
             b++
         }
@@ -220,6 +288,23 @@ class EqEngine {
         preampGain = 10.0.pow(curPreampDb / 20.0)
 
         snapNext = false
+    }
+
+    /**
+     * Credits the block just processed towards each identity band's flush.
+     *
+     * Only bands that actually ran are credited, which is what keeps the
+     * two-sample guarantee honest when a buffer ends mid-block.
+     */
+    private fun noteBlockProcessed(block: Int) {
+        var i = 0
+        while (i < activeCount) {
+            val b = activeBands[i]
+            if (curGain[b] == 0.0 && flushedSamples[b] < FLUSH_SAMPLES) {
+                flushedSamples[b] = minOf(FLUSH_SAMPLES, flushedSamples[b] + block)
+            }
+            i++
+        }
     }
 
     private fun approach(current: Double, target: Double, maxStep: Double): Double {
@@ -243,6 +328,17 @@ class EqEngine {
     companion object {
         /** Samples between coefficient redesigns. 0.67 ms at 48 kHz. */
         const val CONTROL_BLOCK = 32
+
+        /**
+         * Samples an identity section must run for before it is safe to drop.
+         *
+         * Two, exactly: see the class comment for the two lines of algebra
+         * that prove the state is empty by then.
+         */
+        const val FLUSH_SAMPLES = 2
+
+        /** Where a band with no entry in the list parks. Inaudible at 0 dB. */
+        private const val ABSENT_HZ = 1000.0
 
         private const val MAX_GAIN_DB_PER_SEC = 120.0
         private const val MAX_Q_PER_SEC = 8.0
