@@ -62,11 +62,19 @@ fun NowPlayingScreen(
     sound: SoundState = SoundState(),
     onSound: (SoundState) -> Unit = {},
     onCompare: (active: Boolean, showEqualized: Boolean) -> Unit = { _, _ -> },
+    onImportProfile: () -> Unit = {},
+    onPasteProfile: (String) -> Unit = {},
+    onExportProfile: () -> Unit = {},
+    onRemoveProfile: () -> Unit = {},
+    profilePreview: ProfilePreview? = null,
+    onApplyPreview: () -> Unit = {},
+    onDismissPreview: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val p = LocalPalette.current
     var confirming by remember { mutableStateOf(false) }
     var soundOpen by remember { mutableStateOf(false) }
+    var removingProfile by remember { mutableStateOf(false) }
 
     Box(modifier.fillMaxSize()) {
         Column(
@@ -127,10 +135,42 @@ fun NowPlayingScreen(
         if (soundOpen && !confirming) {
             SoundSheet(
                 state = sound,
+                onImportProfile = onImportProfile,
+                onPasteProfile = onPasteProfile,
+                onExportProfile = onExportProfile,
+                onRemoveProfile = { removingProfile = true },
                 status = status,
                 onChange = onSound,
                 onDismiss = { soundOpen = false },
                 onCompare = onCompare,
+            )
+        }
+
+        // Above the Sound sheet, not inside it: this is a decision about
+        // whether to change what is playing, and it must survive the sheet
+        // scrolling underneath it.
+        if (profilePreview != null) {
+            ProfilePreviewSheet(
+                preview = profilePreview,
+                onApply = onApplyPreview,
+                onDismiss = onDismissPreview,
+            )
+        }
+
+        // Removing a profile is confirmed for the same reason Disconnect is:
+        // it discards something the user went and found, and the only way
+        // back is to find it again.
+        if (removingProfile) {
+            ConfirmSheet(
+                title = "Remove the profile?",
+                body = "The curve goes back to the preset and the two sliders. " +
+                    "Your Bass and Warmth settings are kept.",
+                confirmLabel = "Remove",
+                onConfirm = {
+                    removingProfile = false
+                    onRemoveProfile()
+                },
+                onCancel = { removingProfile = false },
             )
         }
 

@@ -93,6 +93,10 @@ fun SoundSheet(
     onChange: (SoundState) -> Unit,
     onDismiss: () -> Unit,
     onCompare: (active: Boolean, showEqualized: Boolean) -> Unit = { _, _ -> },
+    onImportProfile: () -> Unit = {},
+    onPasteProfile: (String) -> Unit = {},
+    onExportProfile: () -> Unit = {},
+    onRemoveProfile: () -> Unit = {},
 ) {
     val sampleRate = status.sampleRate
     val p = LocalPalette.current
@@ -132,6 +136,12 @@ fun SoundSheet(
     val preampDb = remember(state, sampleRate) {
         state.toEqSettings(sampleRate).preampDb
     }
+
+    // The same object the filters were built from, so the hints and the
+    // numbers in Advanced cannot describe a different curve from the one
+    // playing. Keyed identically to the preamp above, which is what keeps
+    // both tracking a dragging finger without recomputing twice.
+    val layered = remember(state, sampleRate) { state.layered(sampleRate) }
 
     Box(
         Modifier
@@ -185,6 +195,18 @@ fun SoundSheet(
                             style = Type.subhead,
                             color = p.textSecondary,
                         )
+                        // The loaded profile is named on the main surface
+                        // rather than only in Advanced, because it is the
+                        // base of everything else on this sheet. Somebody
+                        // wondering why Flat does not sound flat deserves to
+                        // see the reason without opening anything.
+                        state.profile?.let { pr ->
+                            WtText(
+                                text = pr.name.ifEmpty { "Earbud profile loaded" },
+                                style = Type.caption,
+                                color = p.textTertiary,
+                            )
+                        }
                     }
                     WtSwitch(
                         checked = state.enabled,
@@ -258,23 +280,7 @@ fun SoundSheet(
                     // trimmed, and without this the slider would read +6 while
                     // the band sat at +8 with no explanation for the
                     // difference.
-                    val capped = state.cappedBandCount()
-                    if (capped > 0) {
-                        Spacer(Modifier.height(Space.s1))
-                        WtText(
-                            text = "Boost limited to keep the sound clean.",
-                            style = Type.caption,
-                            color = p.warn,
-                            modifier = Modifier.clearAndSetSemantics {
-                                contentDescription =
-                                    "Boost limited to keep the sound clean. " +
-                                    (if (capped == 1) "One band has" else "$capped bands have") +
-                                    " reached the ${SoundState.MAX_BOOST_DB.toInt()} decibel " +
-                                    "ceiling, so turning these sliders up further will not " +
-                                    "raise them any more."
-                            },
-                        )
-                    }
+                    ProfileHints(state, layered)
 
                     if (state.isCustom) {
                         Spacer(Modifier.height(Space.s1))
@@ -379,6 +385,17 @@ fun SoundSheet(
                             onClick = { onChange(state.withoutCustom()) },
                             spokenLabel = "Discard the hand-edited bands and go back to " +
                                 "the preset and the two sliders.",
+                        )
+
+                        Spacer(Modifier.height(Space.s3))
+
+                        EarbudCorrection(
+                            profile = state.profile,
+                            layered = layered,
+                            onImportFile = onImportProfile,
+                            onPasteText = onPasteProfile,
+                            onExport = onExportProfile,
+                            onRemove = onRemoveProfile,
                         )
 
                         Spacer(Modifier.height(Space.s3))
