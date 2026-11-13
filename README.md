@@ -1,50 +1,250 @@
-# Wired Tooth
+# Luma (Wired Tooth)
 
 Streams a Windows PC's system audio over local Wi-Fi so that **wired** earbuds
 plugged into a phone can play it with far less delay than Bluetooth.
+The PC captures its own output, puts it on the network as uncompressed PCM,
+and the phone plays it through the wire.
 
-> **Status: v1.0 is not finished.** The Windows sender and receiver are
-> complete and measured. The iOS app does not exist yet, and the stream has
-> never been received by a device other than the PC that sent it. Every number
-> below is a loopback number. See [Known limitations](#known-limitations) —
-> they are stated up front rather than buried.
+The repository is called Wired Tooth; the Android app is called Luma.
+
+## Status
+
+Working end to end over real Wi-Fi, Windows to a second device, with a
+parametric equalizer on the receiver. Not finished: the headline latency
+figure is still an estimate, and nobody has judged any of it by ear.
+
+| | |
+|---|---|
+| Sender | Windows, .NET 10, WASAPI loopback. Tray app with QR pairing. |
+| Receiver | Android, Kotlin, AudioTrack. Built and tested on Windows. |
+| Receiver | Windows console, kept permanently as the regression test. |
+| Receiver | Python statistics-only, stdlib, for any second machine. |
+| iPhone | **Source lost.** A built app still runs on one phone; it cannot be rebuilt, changed or reinstalled. Treat it as gone. |
+
+A Swift receiver is still open work. Xcode is macOS-only, so Android was
+substituted deliberately — see `docs/IOS_AUDIO.md` for the routing research
+and `BUILD_PLAN.md` for the reasoning.
 
 ## The problem
 
-Bluetooth audio is late. A2DP has to buffer, and the codec adds its own delay,
-so a typical headset lands somewhere between 150 and 250 ms behind the video.
-That is invisible for music and unusable for anything where you can see the
-cause: lips move before the words, a gunshot arrives after the muzzle flash,
+Bluetooth audio is late. A2DP buffers, and the codec adds its own delay, so a
+typical headset lands roughly 150–250 ms behind the picture. That is invisible
+for music and unusable when you can see the cause: lips move before the words,
 a key press sounds after you feel it.
 
 Wired earbuds have none of that latency, but a phone's wired earbuds cannot
-play a laptop's audio. Wired Tooth makes them: the PC captures its own output,
-puts it on the network, and the phone plays it through the wire.
+play a laptop's audio. This makes them.
 
 ## Measured
 
-Loopback only. The transport, the jitter buffer and the drift control loop are
-real and measured; the network is not.
+Two separate runs. Both are real measurements from this repository's own
+tools; neither is an estimate.
 
-| | measured |
+**Over real Wi-Fi**, Windows sender to a Mac running the Python statistics
+receiver:
+
+| | |
 |---|---|
-| Buffer depth, 27.8 min continuous | mean **61.08 ms** against a 60 ms target |
-| Drift across that run | **+0.54 ms** (first-half mean 60.5, second-half 60.2) |
+| Packets | **13,721** |
+| Loss | **0.04%** |
+| Median RTT | **10.52 ms** |
+
+**Over loopback**, 27.8 minutes continuous, which is where the drift control
+loop is actually exercised:
+
+| | |
+|---|---|
+| Buffer depth | mean **61.08 ms** against a 60 ms target |
+| Drift across the run | **+0.54 ms** |
 | Underruns | **0** |
 | Packets lost | **0** of 251,487 |
-| Estimated end-to-end | **~110 ms** (RTT/2 + buffer + output latency) |
-| Median RTT | 0.52 ms loopback |
 | Wire bitrate | 1,566 kbit/s (PCM16 48 kHz stereo + headers) |
 
-**The ~110 ms figure is an estimate, not a measurement.** It assumes a
-symmetric network path and uses the output latency the device was *asked* for
-rather than what it delivered, and it excludes everything before the packet
-leaves — WASAPI's own capture buffer, and the delay between an application
-producing a sample and loopback handing it over. The honest number comes from
-the acoustic method in [docs/MEASUREMENT.md](docs/MEASUREMENT.md), which has
-not been performed. There is deliberately **no Bluetooth comparison table
-here**, because doing that properly requires the acoustic measurement and a
-Bluetooth headset, and inventing one would be the easiest lie in the project.
+### What is only an estimate
+
+**End-to-end latency, ~110 ms.** This is arithmetic, not a measurement:
+RTT/2 + buffer + the output latency the device was *asked* for. It assumes a
+symmetric network path, uses a requested figure rather than a delivered one,
+and excludes everything before the packet leaves — WASAPI's own capture
+buffer, and the delay between an application producing a sample and loopback
+handing it over.
+
+The honest number comes from the acoustic method in `docs/MEASUREMENT.md`,
+which **has not been performed**. There is deliberately no Bluetooth
+comparison table here: doing that properly needs the acoustic measurement and
+a Bluetooth headset, and inventing one would be the easiest lie in the
+project.
+
+## The equalizer
+
+On the Android receiver, in the signal path, with no added latency — these are
+IIR biquads, so the output depends on the current input sample and nothing is
+delayed waiting for it.
+
+- **Ten bands**, one per octave from 31 Hz, plus up to ten more from a loaded
+  profile. Peaking, low-shelf and high-shelf sections, written from the public
+  RBJ Audio EQ Cookbook and cross-checked once against AutoEq's own
+  coefficient expressions: the two agree to **0.0005 dB**.
+- **True-peak headroom.** The preamp is measured from a 256-point scan of the
+  combined response, not guessed from the largest band, because overlapping
+  bands sum to more than any one of them. The figure shown on screen is the
+  reduction actually applied.
+- **A shared gain budget.** A ceiling on each filter does not bound a cascade —
+  ten filters at +8 dB on one frequency is +80 dB, which the preamp would
+  faithfully subtract, leaving silence. The combined peak is bounded instead,
+  so the headroom line can never read worse than **−14.0 dB**.
+- **Fair A/B.** Compare matches loudness in the power domain before switching,
+  so you hear the tone change and not a volume change. It only ever turns the
+  *unprocessed* side down, so comparing costs no headroom.
+- **Earbud profiles.** Import a correction from a file or by pasting text, in
+  our own `luma-profile 1` format or the parametric-EQ text format other tools
+  write. Preview before applying, export, remove. No new Android permission:
+  the system file picker carries its own grant.
+- **No bundled profile data.** None, from any third party. The app knows how
+  to read a profile; it does not ship one.
+
+Both parsers are total — malformed input is dropped and counted, never thrown
+on. See **Known gaps** for what that does and does not prove.
+
+## Tests
+
+| | |
+|---|---|
+| Android unit tests | **157** |
+| Android instrumented tests | **22** |
+| C# tests | **none** |
+
+The C# sender and the Windows console receiver have no automated tests at
+all. They are exercised by running them.
+
+Fuzzing, all on the Kotlin side:
+
+- **WTP1 packet parser** — 17 hand-written bad cases, all 11,220 single-byte
+  mutations of a valid packet, and 20,000 random datagrams. Zero exceptions.
+- **Profile parser** — 69,390 single-byte mutations of two valid files (every
+  byte replaced by every value, plus a deletion at every position) and 20,000
+  random inputs: random bytes, random Unicode, 4,000-digit numbers, repeated
+  keywords, size-boundary cases. Zero exceptions, every result finite and
+  inside the engine's limits. Worst parse time on 64 KB of hostile input:
+  **3.02 ms** against a 50 ms budget.
+
+## Build
+
+### Windows side
+
+Requires the **.NET 10 SDK on Windows** — specifically Windows, because
+capture is WASAPI loopback, playback is WASAPI shared mode, and the tray app
+is WPF. There is no cross-platform build.
+
+```
+dotnet build WiredTooth.sln
+```
+
+NAudio and QRCoder restore from NuGet.
+
+### Android side
+
+Requires the Android SDK; builds on Windows with no Mac involved.
+
+```
+cd AndroidReceiver && ./gradlew assembleDebug
+```
+
+```
+cd AndroidReceiver && ./gradlew testDebugUnitTest
+```
+
+Instrumented tests need a device or emulator. Because Gradle uninstalls both
+APKs when `connectedAndroidTest` finishes — taking any screenshots with it —
+the acceptance runs install manually and drive `am instrument` directly.
+
+### Python tooling
+
+The applications need no Python. The analysis tools do, and they deliberately
+do not share one dependency list: the tool most likely to run on a borrowed
+machine has none.
+
+| Tool | Needs |
+|---|---|
+| `MacReceiver/receiver_stats.py` | **nothing** — stdlib only |
+| `tools/plot_metrics.py` | `matplotlib` |
+| `tools/acoustic.py` | `numpy` |
+
+## Run
+
+**The Windows app**, the normal way:
+
+```
+dotnet run --project WiredTooth.Windows
+```
+
+Shows whether it is streaming, a pairing QR encoding `wiredtooth://<ip>:5000`,
+the phones connected, and session stats. "If it isn't working" runs read-only
+checks — addresses, bound ports, Windows Firewall — and names the cause.
+Closing the window keeps it streaming from the notification area.
+
+**Console sender and receiver**, the debugging path. Start the receiver first;
+the sender does not transmit until a client says `HELLO`:
+
+```
+dotnet run --project NetworkTest
+```
+
+```
+dotnet run --project NetworkClient
+```
+
+The receiver writes `metrics_<timestamp>.csv`, one row per second.
+
+**Statistics-only receiver** for a second machine with no audio stack. Exits
+non-zero if loss reaches 1%, so it can gate a script:
+
+```
+python3 MacReceiver/receiver_stats.py 192.168.1.42 --seconds 120
+```
+
+**Diagnostics.** `AudioInspect` prints the capture format and raw samples —
+the first thing to run when audio sounds wrong. `NetworkTest --waveout`
+selects the old WinMM backend, which reproduces the 16.7% drain described in
+`docs/ENGINEERING_NOTES.md`.
+
+## Known gaps
+
+- **No acoustic latency measurement.** The headline ~110 ms is an estimate and
+  there is no Bluetooth comparison. The tooling is written and self-tested; it
+  needs a microphone, the earbuds, and a Bluetooth headset.
+- **Nothing has been judged by ear.** No preset, macro or imported correction
+  in this app has ever been listened to through wired earbuds. The tests prove
+  it applies what was asked for, not that the result is any good.
+  `docs/LISTENING_TEST.md` is the procedure; its boxes are empty.
+- **The file picker and export have never been run.** Every automated UI test
+  pasted text instead, so `ACTION_OPEN_DOCUMENT` and `ACTION_CREATE_DOCUMENT`
+  have been drawn on screen and never opened. The no-permission claim rests on
+  Android's documentation, not on a run.
+- **No phone CPU figures.** Every timing number came from an emulator on a
+  desktop CPU. None of them transfer, and none should be quoted as a phone
+  number.
+- **TalkBack is unverified in use.** Tests drove the accessibility tree, which
+  proves labels exist and can be found; it does not prove the gestures are
+  comfortable or the reading order sensible.
+- **The iPhone app cannot be rebuilt.** Its source is lost.
+- **No encryption or authentication.** Anything on the network that sends a
+  valid `HELLO` receives the stream.
+- **Uncompressed**, 1,566 kbit/s per client. The `codec` header field exists
+  so Opus can be added without breaking compatibility; it is 0 and unused.
+- **The Windows app cannot show latency, loss or buffer depth.** Those are
+  measured at the receiver and WTP1 has no packet type to report them back.
+  The window says so rather than displaying zeros.
+- **IPv4 only.**
+
+## What's next
+
+1. **The acoustic measurement.** Everything else is guesswork until the number
+   includes the parts no API reports.
+2. **The listening test**, on a real phone with real earbuds.
+3. **A `STATS` control packet**, so the sender can display what the receiver
+   measures.
+4. **The Swift receiver**, when a Mac is available.
 
 ## Architecture
 
@@ -58,224 +258,44 @@ flowchart TD
     F --> G[Wi-Fi]
     G --> H[jitter buffer<br/>60 ms target]
     H --> I[drift correction<br/>continuous resampling, +/-0.5%]
-    I --> J[WasapiOut shared mode]
-    J --> K[wired earbuds]
+    I --> J[equalizer<br/>peaking + shelf, true-peak preamp]
+    J --> K[AudioTrack / WasapiOut]
+    K --> L[wired earbuds]
 
-    L[PING/PONG<br/>RTT probe] -.-> F
-    H -.-> M[metrics CSV<br/>1 row/sec]
+    M[PING/PONG<br/>RTT probe] -.-> F
+    H -.-> N[metrics CSV<br/>1 row/sec]
 ```
 
-The control channel runs alongside the audio, not inside it: the receiver
+The control channel runs alongside the audio, not inside it. The receiver
 initiates with `HELLO`, which is what lets a phone connect without the PC
-knowing its address in advance — the client's address is learned from the
+knowing its address in advance: the client's address is learned from the
 source of its own packet.
 
-## How it works
+Three decisions worth knowing, each explained where it lives:
 
-### Capture
+- **UDP, never TCP.** A retransmission arriving 200 ms late is useless for
+  live audio. A lost 5 ms beats a 200 ms freeze.
+- **Drift correction is proportional with no integral term.** The steady-state
+  offset a P controller leaves behind *is* the clock difference; an integrator
+  would drive it to zero, wind up, and waver audibly.
+- **`WasapiOut`, never `WaveOutEvent`.** Measured on this machine, same device
+  and format, no networking: WinMM drained 16.7% slower than real time. No
+  control loop can close that gap. `docs/ENGINEERING_NOTES.md`.
 
-`WasapiLoopbackCapture` taps the default render endpoint, so whatever the PC
-is playing is what gets captured, with no virtual cable or extra driver. It
-delivers 32-bit float, which is converted to 16-bit PCM for the wire: half the
-bandwidth, no audible loss, and directly playable by any receiver.
-
-The conversion clamps before scaling. Loopback can hand back samples slightly
-outside [-1, 1] when an application applies its own gain, and an unclamped cast
-wraps a sample just over +1.0 into a large **negative** int16 — a full-scale
-discontinuity, audible as a click on exactly the loudest passages.
-
-WASAPI loopback also stops firing entirely when the PC is silent. It does not
-deliver buffers of zeros; it simply stops. The sender emits silence-flagged
-empty packets so the receiver's buffer and RTT tracking survive quiet passages.
-
-### Transport
-
-UDP unicast, never TCP. A retransmission that arrives 200 ms late is useless
-for live audio — a lost 5 ms is better than a 200 ms freeze.
-
-Packets are capped at 1400 bytes total, under the usual 1500-byte Wi-Fi MTU,
-because a fragmented datagram loses the whole frame if any one fragment drops.
-Payloads are always a whole number of frames: a datagram that split a frame
-would leave the receiver permanently half a sample out of alignment, which
-swaps left and right and sounds like noise.
-
-The parser is total. Anything malformed is dropped and counted, never thrown
-on — verified against 17 hand-written bad cases, all 11,220 single-byte
-mutations of a valid packet, and 20,000 random datagrams, with zero exceptions.
-
-Full wire format: [docs/PROTOCOL.md](docs/PROTOCOL.md).
-
-### The drift-correction control loop
-
-This is the part that makes it survive more than a few minutes.
-
-The sender's sound card and the receiver's are never at exactly the same rate.
-A few parts per million sounds like nothing, but at 48 kHz a 20 ppm difference
-is about one sample per second — roughly 3.6 seconds of accumulated error per
-hour. The buffer either drains to zero and clicks, or grows until latency is
-unusable. It looks perfect for two minutes and fails at twenty.
-
-The fix is not to resynchronise occasionally, because dropping or duplicating a
-block of samples is audible. It is to run permanently slightly off-speed, by an
-amount too small to hear, in whichever direction keeps the buffer level:
-
-```
-error  = bufferMs - 60ms            (positive = too full)
-target = 1 + Kp * error             (>1 = play faster, drain)
-ratio  = ratio + (target - ratio) * 0.1
-```
-
-Clamped to ±0.5%, about 8.7 cents of pitch. There is **no integral term**, on
-purpose: the steady-state offset a proportional controller leaves behind *is*
-the clock difference, and holding a small constant error is how the loop
-expresses "run 12 ppm fast forever". An integrator would drive that error to
-zero, wind up, and oscillate — audible as a slow pitch waver.
-
-The ratio is applied by resampling incoming audio before it enters the buffer,
-using linear interpolation with fractional phase carried across packet
-boundaries. Resetting phase per packet would click 140 times a second.
-
-## Build
-
-Requires the **.NET 10 SDK on Windows**. Windows specifically, not just
-Windows-preferred: capture is WASAPI loopback and playback is WASAPI shared
-mode, and the tray app is WPF. There is no cross-platform build.
-
-```
-dotnet build WiredTooth.sln
-```
-
-That builds all six projects. NAudio and QRCoder restore from NuGet; nothing
-else is needed for the applications themselves.
-
-### Python tooling
-
-The applications need no Python. The measurement and analysis tools do, and
-they deliberately do not share one dependency list — the tool most likely to
-run on a borrowed machine has no dependencies at all.
-
-| Tool | Needs | Why |
-|---|---|---|
-| `MacReceiver/receiver_stats.py` | **nothing** — stdlib only | It runs on whatever second device you can find. Requiring `pip install` on a borrowed laptop is how a test does not get run. |
-| `tools/plot_metrics.py` | `matplotlib` | Charts the metrics CSV. |
-| `tools/acoustic.py` | `numpy` | FFT cross-correlation for the latency measurement. |
-
-```
-pip install numpy matplotlib
-```
-
-Python 3.9 or newer. Verified here on 3.14.3 with numpy 2.4.4 and matplotlib
-3.11.1.
-
-## Run
-
-**Windows app** (the normal way):
-
-```
-dotnet run --project WiredTooth.Windows
-```
-
-Opens a window showing whether it is streaming, a pairing QR encoding
-`wiredtooth://<ip>:5000`, the phones currently connected, and session stats.
-"If it isn't working" runs read-only checks -- addresses, bound ports, the
-Windows Firewall -- and names the cause rather than leaving you to guess.
-
-Closing the window keeps it streaming from the notification area; Exit there
-quits. `--console` keeps the old console behaviour.
-
-**Console sender and receiver** (the debugging path):
-
-```
-dotnet run --project NetworkTest
-```
-
-```
-dotnet run --project NetworkClient
-```
-
-Start the receiver first — the sender does not transmit until a client says
-`HELLO`. The receiver writes `metrics_<timestamp>.csv`, one row per second.
-
-**Chart a run:**
-
-```
-python tools/plot_metrics.py metrics_20260911_110230.csv
-```
-
-**Statistics-only receiver**, for a second machine with no audio stack:
-
-```
-python3 MacReceiver/receiver_stats.py 192.168.1.42 --seconds 120
-```
-
-Reports loss, RTT median/p95/max, transit jitter and bitrate, and exits
-non-zero if loss reaches 1%, so it can gate a script.
-
-**Measure real latency acoustically.** Generate the click track, play it while
-recording the room with one microphone, and analyse:
-
-```
-python tools/acoustic.py generate -o clicks.wav
-```
-
-```
-python tools/acoustic.py measure recording.wav --reference reference.wav
-```
-
-Record the `--reference` pass first with the earbud silent. A click reflecting
-off a desk lands 5-15 ms behind the direct sound, which is the same range as a
-good result, so without it a reflection cannot be told from the earbud — and
-the tool will refuse to answer rather than guess. Verify the analyser against
-known delays with `python tools/acoustic.py selftest`. Full procedure and the
-three configurations to compare: [tools/benchmark.md](tools/benchmark.md).
-
-**Diagnostics.** `AudioInspect` prints the capture format and raw sample values
-— the first thing to run when audio sounds wrong. `NetworkTest --waveout`
-selects the old WinMM output backend, which reproduces the 16.7% drain
-described in [docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md).
-
-## Known limitations
-
-- **Never tested over real Wi-Fi.** Every number here is loopback. Loopback
-  does not drop, reorder, fragment, or vary in delay. The QR pairing, the
-  handshake and the address picker all work, but nothing has ever received
-  this stream except the PC that sent it.
-- **No iOS app.** The receiver is Windows-only. iOS needs a Mac with Xcode;
-  the routing research is in [docs/IOS_AUDIO.md](docs/IOS_AUDIO.md).
-- **No acoustic latency measurement**, so the headline number is an estimate
-  and there is no Bluetooth comparison.
-- **Uncompressed.** 1,566 kbit/s per client. Fine on a hotspot, wasteful in
-  general. The `codec` header field exists so Opus can be added without
-  breaking compatibility; it is 0 and unused.
-- **No encryption or authentication.** Anything on the network that sends a
-  valid `HELLO` receives the stream.
-- **The Windows app cannot show latency, loss or buffer depth.** Those are
-  measured at the receiver, and WTP1 has no packet type to report them back.
-  The window says so rather than displaying zeros; the phone shows its own.
-- **IPv4 only.**
-
-## What I'd do next
-
-1. **The acoustic measurement.** Everything else is guesswork until the number
-   includes the parts no API reports. The tooling is written and self-tested
-   ([tools/benchmark.md](tools/benchmark.md)); it needs a microphone, the
-   earbuds, and a Bluetooth headset to compare against.
-2. **The iOS receiver**, which is also the only thing that proves the Wi-Fi
-   path works at all.
-3. **A `STATS` control packet**, so the sender can display what the receiver
-   measures instead of pointing at another terminal.
-4. **Opus**, once there is a real network to justify it.
+Full wire format: `docs/PROTOCOL.md`.
 
 ## Repository
 
 | Path | Role |
 |---|---|
-| `WiredTooth.Protocol/` | WTP1 wire format. Shared, and mirrored by the Python receiver. |
-| `WiredTooth.Sender/` | The sender: capture, packetisation, control channel, device handling. |
-| `WiredTooth.Windows/` | WPF desktop app: status, QR pairing, connected phones, network checks. Tray icon keeps it alive when closed. |
-| `NetworkClient/` | Console front-end over the same sender. Debugging and regression. |
-| `NetworkTest/` | Windows receiver: jitter buffer, drift correction, metrics. |
-| `AudioInspect/` | Capture-format diagnostic. |
-| `MacReceiver/` | Stdlib Python statistics receiver for a second machine. |
+| `WiredTooth.Protocol/` | WTP1 wire format. Shared, and mirrored by the Kotlin and Python receivers. |
+| `WiredTooth.Sender/` | Capture, packetisation, control channel, device handling. |
+| `WiredTooth.Windows/` | WPF tray app: status, QR pairing, connected phones, network checks. |
+| `AndroidReceiver/` | Kotlin receiver: jitter buffer, drift correction, equalizer, profiles. |
+| `NetworkClient/` | Console front-end over the same sender. |
+| `NetworkTest/` | Windows console receiver. Kept permanently as the regression test. |
+| `AudioInspect/` | Capture-format diagnostic. Never delete. |
+| `MacReceiver/` | Stdlib Python statistics receiver. |
 | `tools/` | `plot_metrics.py` charts a run; `acoustic.py` measures real latency. |
-| `docs/` | Protocol, measurement method, iOS routing, engineering notes. |
+| `docs/` | Protocol, measurement method, iOS routing, engineering notes, listening test. |
+| `BUILD_PLAN.md` | Work packages and the honestly-scored v1.0 criteria. |

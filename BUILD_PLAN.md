@@ -21,8 +21,12 @@ commit, then move on. Never run two packages at once.
 [x] WP7  Android receiver (substituted for iOS - see note below)
 [ ] WP7-iOS  Swift receiver        <- still open, needs a Mac
 [~] WP8  acoustic benchmark        <- tooling done + self-tested; needs a mic
-[x] WP9  README + engineering notes
+[x] WP9  README + engineering notes   (rewritten after Phase 2b)
 [ ] WP10 the post
+
+Phase 2 — the receiver-side equalizer, not in the original plan:
+[x] 2a   ten-band EQ, true-peak preamp, fair A/B, live curve
+[x] 2b   shelf filters, 20-section engine, shared gain budget, earbud profiles
 ```
 
 **v1.0 criteria, honestly scored** (see "What finished means" below):
@@ -35,11 +39,15 @@ commit, then move on. Never run two packages at once.
 | 4 | Handles device changes | done |
 | 5 | Measured, not guessed, latency | **partial** — 10.52 ms RTT measured over Wi-Fi; the acoustic end-to-end number is WP8 |
 | 6 | Runs as an app, not a console | done |
-| 7 | Documented | **done** — README, PROTOCOL, MEASUREMENT, ENGINEERING_NOTES, IOS_AUDIO |
+| 7 | Documented | **done** — README, PROTOCOL, MEASUREMENT, ENGINEERING_NOTES, IOS_AUDIO, LISTENING_TEST |
 
 Criterion 1 is now proven on a real network: 13,721 packets at 0.04% loss and 10.52 ms
 median RTT, Windows to Mac over Wi-Fi. Every number before that was loopback, which
 cannot fail the way Wi-Fi fails.
+
+**The iPhone app's source is lost.** A built app still runs on one phone and cannot be
+rebuilt, changed or reinstalled; treat it as gone. The criteria under v2.0 below are
+therefore unmet and unprovable as written, and the Swift receiver remains open work.
 
 **WP7 was delivered as an Android receiver rather than the iOS one this plan specifies.**
 That is a deliberate substitution. Android Studio runs on Windows, so `AndroidReceiver/`
