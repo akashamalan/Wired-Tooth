@@ -32,6 +32,13 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.wiredtooth.receiver.dsp.SoundState
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.rememberCoroutineScope
+import com.wiredtooth.receiver.dsp.ProfileParser
+import com.wiredtooth.receiver.ui.ProfilePreview
+import kotlinx.coroutines.launch
 import com.wiredtooth.receiver.ui.ConnectScreen
 import com.wiredtooth.receiver.ui.ConnectError
 import com.wiredtooth.receiver.ui.Device
@@ -99,6 +106,56 @@ private fun App(prefilledIp: String?) {
     // equalized the way the user left it rather than starting flat and
     // snapping a moment later.
     var sound by remember { mutableStateOf(SoundStore.load(context)) }
+
+    // What a parse produced, waiting for Apply or Cancel. Null means no
+    // decision is pending. Nothing here touches [sound] until the user
+    // applies it, which is the whole contract of the preview.
+    var preview by remember { mutableStateOf<ProfilePreview?>(null) }
+    val scope = rememberCoroutineScope()
+
+    /**
+     * Reading a picked file happens off the main thread.
+     *
+     * The URI may belong to a cloud provider, where opening the stream is a
+     * network round trip inside that provider's process. On the main thread
+     * that is a frozen UI and, at 64 KB with a slow provider, an ANR.
+     */
+    fun readProfile(uri: Uri) {
+        scope.launch {
+            val result = withContext(Dispatchers.IO) { ProfileIo.read(context, uri) }
+            preview = when (result) {
+                is ProfileIo.ReadResult.Parsed ->
+                    if (result.profile.isEmpty) {
+                        ProfilePreview(error = "Nothing usable in this file")
+                    } else {
+                        ProfilePreview(profile = result.profile)
+                    }
+                is ProfileIo.ReadResult.Failed -> ProfilePreview(error = result.message)
+            }
+        }
+    }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        // OpenDocument, not GetContent: it returns a URI we can read without
+        // any storage permission, and the user picks the file themselves.
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) readProfile(uri) }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        val profile = sound.profile
+        if (uri != null && profile != null) {
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    ProfileIo.write(context, uri, profile)
+                }
+                // A silent failure would leave the user believing they have a
+                // backup they do not have.
+                if (!ok) preview = ProfilePreview(error = "Luma could not write that file.")
+            }
+        }
+    }
 
     fun connect(ip: String) {
         receiver?.stop()
@@ -177,6 +234,42 @@ private fun App(prefilledIp: String?) {
                         onCompare = { active, showEqualized ->
                             receiver?.setCompare(active, showEqualized)
                         },
+                        onImportProfile = { importLauncher.launch(arrayOf("*/*")) },
+                        onPasteProfile = { text ->
+                            val parsed = ProfileParser.parse(text)
+                            preview = when {
+                                parsed.rejected -> ProfilePreview(
+                                    error = parsed.warnings.firstOrNull()
+                                        ?: "That text is too long to be a profile.",
+                                )
+                                parsed.isEmpty -> ProfilePreview(
+                                    error = "Nothing usable in this text",
+                                )
+                                else -> ProfilePreview(profile = parsed)
+                            }
+                        },
+                        onExportProfile = {
+                            sound.profile?.let {
+                                exportLauncher.launch(ProfileIo.suggestedFileName(it))
+                            }
+                        },
+                        onRemoveProfile = {
+                            val next = sound.withoutProfile()
+                            sound = next
+                            receiver?.applySound(next)
+                            SoundStore.save(context, next)
+                        },
+                        profilePreview = preview,
+                        onApplyPreview = {
+                            preview?.profile?.let { pr ->
+                                val next = sound.withProfile(pr)
+                                sound = next
+                                receiver?.applySound(next)
+                                SoundStore.save(context, next)
+                            }
+                            preview = null
+                        },
+                        onDismissPreview = { preview = null },
                         onDisconnect = {
                             receiver?.stop()
                             receiver = null

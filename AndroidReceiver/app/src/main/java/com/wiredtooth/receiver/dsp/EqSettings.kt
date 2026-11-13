@@ -1,16 +1,32 @@
 package com.wiredtooth.receiver.dsp
 
 /**
- * One parametric band: a centre frequency, a boost or cut, and a width.
+ * Which of the three second-order shapes a band is.
+ *
+ * Three and no more, because these are exactly the types an imported
+ * parametric file can name: PK, LSC and HSC. Anything else in a file is
+ * skipped and counted rather than approximated -- substituting a peak for a
+ * shelf is wrong by about 3 dB in the sub-bass, which is the single most
+ * audible part of a headphone correction.
+ */
+enum class BandType { Peaking, LowShelf, HighShelf }
+
+/**
+ * One parametric band: a shape, a centre frequency, a boost or cut, and a
+ * width.
  *
  * Q is the usual bandwidth control. 1.41 is a little under one octave, which
  * is wide enough that ten bands overlap into a smooth curve rather than ten
  * separate bumps.
+ *
+ * [type] defaults to [BandType.Peaking] so that every call site written
+ * before shelves existed still means what it meant.
  */
 data class EqBand(
     val frequencyHz: Float,
     val gainDb: Float,
     val q: Float,
+    val type: BandType = BandType.Peaking,
 )
 
 /**
@@ -108,6 +124,21 @@ data class EqSettings(
 
     companion object {
         const val BAND_COUNT = 10
+
+        /**
+         * The most sections the engine will ever run per channel.
+         *
+         * Ten for the user's own preset-and-macro curve plus ten for an
+         * imported profile layered under it. The engine allocates for this
+         * many once, in configure, because the alternative is allocating on
+         * the audio thread when somebody loads a profile.
+         *
+         * Running twenty is not the normal case: a band at exactly 0 dB is
+         * the identity filter, and [EqEngine] drops identity sections from
+         * the cascade once their state has flushed, so the usual cost is the
+         * number of bands actually doing something.
+         */
+        const val MAX_BANDS = 20
 
         /**
          * Ten bands, one per octave from 31 Hz up.
