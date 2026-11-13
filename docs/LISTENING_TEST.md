@@ -223,16 +223,19 @@ NOTES:  (and anything you would cut, move, or reword)
 ```
 
 ---
-
-### 7. Importing a profile you made
+### 7. Importing a profile — through the file picker
 
 An earbud profile is a correction for one particular pair of earbuds. It
 becomes the *base* of the curve; Bass and Warmth still work on top of it.
-Nothing here has been heard — the emulator can show the numbers move, not
-that the result sounds like anything.
 
-**First, write yourself a file.** Any text editor, saved as `.txt`. This is a
-starting point to edit by ear, not a correction for anything in particular:
+**This is the most important item in the whole document.** The file picker has
+never been used. Every automated test pasted text instead, so
+`ACTION_OPEN_DOCUMENT` has been drawn on screen as a button and never
+actually opened. If anything here is broken, this is where it is.
+
+**First, write yourself a file.** Any text editor, saved as `.txt`, moved onto
+the phone. A starting point to edit by ear, not a correction for anything in
+particular:
 
 ```
 luma-profile 1
@@ -243,12 +246,14 @@ highshelf 10000 0.70 1.5
 ```
 
 **Do this.** **Sound → Advanced → Earbud correction → Import file**. Pick the
-file. Read the preview, then tap **Apply**.
+file. Read the preview, then **Apply**.
 
 **What to judge.**
 
-- Did the file picker open without asking for any permission?
-- Does the preview tell you enough to decide — name, filter count, notes?
+- Did the picker open at all, and did it open **without asking for any
+  permission**? A permission prompt here is a FAIL.
+- Could you actually reach your file? Downloads, Drive, wherever you put it.
+- Does the preview give you enough to decide — name, filter count, notes?
 - After Apply: does the name appear under "Sound" at the top of the sheet?
 - Does the **Headroom** number change? Write down both values.
 - Now move **Bass**. It should still do something: the macros work on top of
@@ -256,6 +261,8 @@ file. Read the preview, then tap **Apply**.
 
 ```
 [ ] PASS   [ ] FAIL
+
+Picker asked for a permission?   [ ] no   [ ] yes
 
 Headroom before: ____________   after: ____________
 
@@ -267,27 +274,26 @@ NOTES:
 
 ---
 
-### 8. Importing something that is not a profile
+### 8. Importing the same profile — by pasting
 
-The parser has been fuzzed hard, but "it did not crash" and "it told you
-something useful" are different claims and only the first has been tested.
+The same file, the other way in. This path *has* been tested automatically, so
+a difference between item 7 and this one points at the picker rather than at
+the parser.
 
-**Do this.** Import any file that is not a profile — a photo, a PDF, a song.
-Then use **Paste text** and paste in a sentence of ordinary prose.
+**Do this.** Remove the profile first (item 10), then **Sound → Advanced →
+Earbud correction → Paste text**. Paste the same text, tap **Read this text**,
+then **Apply**.
 
 **What to judge.**
 
-- Does it refuse in plain words, or in jargon?
-- Does it say clearly that your current settings were *not* changed?
-- Check: is the profile from item 7 still loaded, and does the sound still
-  match what it was before you tried?
+- Is the preview identical to the one you saw in item 7?
+- Is the **Headroom** number the same as the one you wrote down there?
+- Is the paste box usable — can you see what you pasted, can you scroll it?
 
 ```
 [ ] PASS   [ ] FAIL
 
-What it said for the non-text file: ____________________________
-
-What it said for the prose: ____________________________
+Headroom here: ____________   (same as item 7? [ ] yes  [ ] no)
 
 NOTES:
 
@@ -297,7 +303,76 @@ NOTES:
 
 ---
 
-### 9. Removing the profile
+### 9. Importing something that is not a profile — both ways
+
+The parser has been fuzzed hard, but "it did not crash" and "it told you
+something useful" are different claims, and only the first has been tested.
+
+**Do this, with a profile already loaded.**
+
+1. **Import file**, and pick something that is not a profile — a photo, a PDF,
+   a song.
+2. **Paste text**, and paste in a sentence of ordinary prose.
+
+**What to judge.**
+
+- Does it refuse in plain words, or in jargon?
+- Does it say clearly that your current settings were **not** changed?
+- Then check that for real: is the profile from item 7 still loaded, and does
+  the sound still match what it was a minute ago?
+
+```
+[ ] PASS   [ ] FAIL
+
+What it said for the non-text file: ____________________________
+
+What it said for the prose: ____________________________
+
+Profile still loaded afterwards?   [ ] yes   [ ] no
+
+NOTES:
+
+
+
+```
+
+---
+
+### 10. Export, then re-import what you exported
+
+Export has never been run either — `ACTION_CREATE_DOCUMENT` is in the same
+position as the picker in item 7. This item is the round trip: what Luma
+writes must be something Luma can read.
+
+**Do this.** With a profile loaded: **Sound → Advanced → Earbud correction →
+Export**. Save it somewhere you can find. Then **Remove profile**, confirm,
+and **Import file** the file you just exported.
+
+**What to judge.**
+
+- Did the save dialog open, and was the suggested file name sensible?
+- Open the exported file in a text editor. Is it readable? Does it look like
+  the format above?
+- After re-importing: same name, same filter count, same **Headroom** number
+  as before you exported?
+- Does it sound the same as it did before the round trip?
+
+```
+[ ] PASS   [ ] FAIL
+
+Suggested file name was: ____________________________
+
+Headroom before export: ________   after re-import: ________
+
+NOTES:
+
+
+
+```
+
+---
+
+### 11. Removing the profile
 
 **Do this.** **Sound → Advanced → Earbud correction → Remove profile**.
 
@@ -313,6 +388,8 @@ NOTES:
 ```
 [ ] PASS   [ ] FAIL
 
+Bass and Warmth survived?   [ ] yes   [ ] no
+
 NOTES:
 
 
@@ -320,6 +397,34 @@ NOTES:
 ```
 
 ---
+
+## Known gaps — what the emulator could not test
+
+Everything in items 7 to 11 exists because an emulator cannot answer it.
+Listed plainly so nothing here is mistaken for a tested claim:
+
+- **The file picker.** `ACTION_OPEN_DOCUMENT` was never opened in any test.
+  The no-permission claim rests on Android's documentation, not on a run.
+- **Export.** `ACTION_CREATE_DOCUMENT` was never opened either, and no file
+  Luma wrote has ever been read back from disk by anything but a unit test.
+- **Phone CPU and heat.** The equalizer runs on every 10 ms of audio, now with
+  up to twenty filter sections. Every timing number in this project came from
+  an emulator on a desktop CPU and none of them transfer.
+- **TalkBack feel.** Automated tests drove the accessibility tree, which
+  proves the labels exist and can be found. It does not prove the gestures are
+  comfortable, or that the reading order makes sense out loud.
+- **Whether any of it sounds right.** No correction, preset or macro in this
+  app has ever been judged by an ear through wired earbuds. The app can prove
+  it applied what the file asked for; it cannot tell you that was worth doing.
+
+And four that no ten-minute test can reach, emulator or not:
+
+- **Long runs.** Clock drift between the two machines takes about half an
+  hour to show up, so nothing here can see it.
+- **Real Wi-Fi.** On a phone hotspot you are on the easiest possible network.
+- **Any other phone or earbuds**, and Bluetooth for comparison.
+- **The light colour scheme on a real screen.** It has been checked in the
+  emulator in both palettes, never on a phone in daylight.
 
 ## Afterwards
 
@@ -332,16 +437,3 @@ Three things are worth more than the boxes:
    the battery dropped more than you expected, say so. The equalizer runs on
    every 10 ms of audio and that cost has only ever been measured on an
    emulator, which tells us nothing about a phone.
-
-## What this test does not cover
-
-- Long runs. Clock drift between the two machines takes about half an hour to
-  show up, so a ten-minute test cannot see it.
-- Real Wi-Fi conditions. If you use a hotspot, you are on the easiest possible
-  network.
-- Any other phone, any other earbuds, or Bluetooth.
-- The light colour scheme on a real screen. It has now been checked in the
-  emulator in both palettes, but never on a phone outdoors.
-- Whether an imported correction actually suits the earbuds it was made for.
-  Only your ears can answer that; the app can only prove it applied what the
-  file asked for.
