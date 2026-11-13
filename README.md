@@ -1,25 +1,32 @@
 # Luma (Wired Tooth)
 
 Streams a Windows PC's system audio over local Wi-Fi so that **wired** earbuds
-plugged into a phone can play it with far less delay than Bluetooth.
-The PC captures its own output, puts it on the network as uncompressed PCM,
-and the phone plays it through the wire.
+plugged into a phone can play it. The PC captures its own output, puts it on
+the network as uncompressed PCM, and the phone plays it through the wire.
+
+The point is to avoid Bluetooth's latency. **That comparison has not been
+measured** — see [What is only an estimate](#what-is-only-an-estimate) — so
+treat it as the goal of the project rather than a result it has delivered.
 
 The repository is called Wired Tooth; the Android app is called Luma.
 
 ## Status
 
-Working end to end over real Wi-Fi, Windows to a second device, with a
-parametric equalizer on the receiver. Not finished: the headline latency
-figure is still an estimate, and nobody has judged any of it by ear.
+The transport works over real Wi-Fi between two machines, and there is a
+parametric equalizer on the Android receiver. What has *not* happened is
+equally important and is listed in full under [Known gaps](#known-gaps).
 
-| | |
+| Piece | State |
 |---|---|
-| Sender | Windows, .NET 10, WASAPI loopback. Tray app with QR pairing. |
-| Receiver | Android, Kotlin, AudioTrack. Built and tested on Windows. |
-| Receiver | Windows console, kept permanently as the regression test. |
-| Receiver | Python statistics-only, stdlib, for any second machine. |
+| Sender | Windows, .NET 10, WASAPI loopback. Tray app with QR pairing. Runs daily. |
+| Windows console receiver | Plays audio. The regression test, run on every change. |
+| Python statistics receiver | Counts packets, loss, RTT, jitter. **Plays no audio by design.** |
+| Android receiver (Luma) | Builds, and passes 157 unit and 22 instrumented tests. **Only ever run on an emulator**, and only ever fed by a test sender inside that same emulator over loopback. It has never run on a physical phone and has never received a packet across a network. |
 | iPhone | **Source lost.** A built app still runs on one phone; it cannot be rebuilt, changed or reinstalled. Treat it as gone. |
+
+So the honest summary is: audio has come out of the Windows console receiver,
+over loopback. Everything else is either a packet count without audio, or an
+emulator.
 
 A Swift receiver is still open work. Xcode is macOS-only, so Android was
 substituted deliberately — see `docs/IOS_AUDIO.md` for the routing research
@@ -38,10 +45,12 @@ play a laptop's audio. This makes them.
 ## Measured
 
 Two separate runs. Both are real measurements from this repository's own
-tools; neither is an estimate.
+tools; neither is an estimate. Each says plainly what it did and did not
+cover.
 
-**Over real Wi-Fi**, Windows sender to a Mac running the Python statistics
-receiver:
+### Run 1 — the transport, over real Wi-Fi
+
+Windows sender to **a Mac running `MacReceiver/receiver_stats.py`**, over Wi-Fi.
 
 | | |
 |---|---|
@@ -49,8 +58,19 @@ receiver:
 | Loss | **0.04%** |
 | Median RTT | **10.52 ms** |
 
-**Over loopback**, 27.8 minutes continuous, which is where the drift control
-loop is actually exercised:
+Source: `BUILD_PLAN.md`, v1.0 criterion 1.
+
+**What this does not show.** `receiver_stats.py` is statistics-only and has no
+audio stack at all — its own header says "No audio, no dependencies", and the
+separation is deliberate: it answers "does the network carry this" and nothing
+else. **No sound was played during this run**, and the Android app was not
+involved in it. It proves the packets cross real Wi-Fi to a second machine. It
+does not prove anything plays them.
+
+### Run 2 — the drift control loop, over loopback
+
+27.8 minutes continuous, PC to itself, which is where clock drift is actually
+exercised.
 
 | | |
 |---|---|
@@ -59,6 +79,11 @@ loop is actually exercised:
 | Underruns | **0** |
 | Packets lost | **0** of 251,487 |
 | Wire bitrate | 1,566 kbit/s (PCM16 48 kHz stereo + headers) |
+
+Sources: `BUILD_PLAN.md` (WP4) and `docs/ENGINEERING_NOTES.md`.
+
+**What this does not show.** Loopback does not drop, reorder, fragment or vary
+in delay, so it cannot fail the way Wi-Fi fails.
 
 ### What is only an estimate
 
@@ -84,7 +109,9 @@ delayed waiting for it.
 - **Ten bands**, one per octave from 31 Hz, plus up to ten more from a loaded
   profile. Peaking, low-shelf and high-shelf sections, written from the public
   RBJ Audio EQ Cookbook and cross-checked once against AutoEq's own
-  coefficient expressions: the two agree to **0.0005 dB**.
+  coefficient expressions: the two agree to **0.0005 dB**
+  (`AndroidReceiver/.../dsp/ShelfTest.kt`, which records where the fixtures
+  came from).
 - **True-peak headroom.** The preamp is measured from a 256-point scan of the
   combined response, not guessed from the largest band, because overlapping
   bands sum to more than any one of them. The figure shown on screen is the
@@ -92,7 +119,8 @@ delayed waiting for it.
 - **A shared gain budget.** A ceiling on each filter does not bound a cascade —
   ten filters at +8 dB on one frequency is +80 dB, which the preamp would
   faithfully subtract, leaving silence. The combined peak is bounded instead,
-  so the headroom line can never read worse than **−14.0 dB**.
+  so the headroom line can never read worse than **−14.0 dB**
+  (`dsp/GainBudgetTest.kt`, asserted for four adversarial profiles).
 - **Fair A/B.** Compare matches loudness in the power domain before switching,
   so you hear the tone change and not a volume change. It only ever turns the
   *unprocessed* side down, so comparing costs no headroom.
@@ -106,13 +134,21 @@ delayed waiting for it.
 Both parsers are total — malformed input is dropped and counted, never thrown
 on. See **Known gaps** for what that does and does not prove.
 
+**None of this has been listened to.** No preset, macro, shelf or imported
+correction in this equalizer has ever been heard through real earbuds, on real
+hardware, by anyone. Every claim above is a measurement of what the filters
+compute, made on a desktop JVM or an emulator. The tests prove the engine
+applies what it was asked for; they say nothing about whether the result
+sounds good, or even correct. `docs/LISTENING_TEST.md` is the procedure for
+finding out and its boxes are empty.
+
 ## Tests
 
-| | |
-|---|---|
-| Android unit tests | **157** |
-| Android instrumented tests | **22** |
-| C# tests | **none** |
+| | | Where |
+|---|---|---|
+| Android unit tests | **157** | `AndroidReceiver/app/src/test/` |
+| Android instrumented tests | **22** | `AndroidReceiver/app/src/androidTest/` |
+| C# tests | **none** | — |
 
 The C# sender and the Windows console receiver have no automated tests at
 all. They are exercised by running them.
@@ -121,12 +157,14 @@ Fuzzing, all on the Kotlin side:
 
 - **WTP1 packet parser** — 17 hand-written bad cases, all 11,220 single-byte
   mutations of a valid packet, and 20,000 random datagrams. Zero exceptions.
+  (`dsp/../WtpPacketTest.kt`; the format is `docs/PROTOCOL.md`.)
 - **Profile parser** — 69,390 single-byte mutations of two valid files (every
   byte replaced by every value, plus a deletion at every position) and 20,000
   random inputs: random bytes, random Unicode, 4,000-digit numbers, repeated
   keywords, size-boundary cases. Zero exceptions, every result finite and
   inside the engine's limits. Worst parse time on 64 KB of hostile input:
-  **3.02 ms** against a 50 ms budget.
+  **3.02 ms** against a 50 ms budget. (`dsp/ProfileFuzzTest.kt`, which prints
+  every count and timing it asserts on.)
 
 ## Build
 
@@ -210,13 +248,23 @@ selects the old WinMM backend, which reproduces the 16.7% drain described in
 
 ## Known gaps
 
+- **The Android receiver has never run on a phone.** Emulator only. It has
+  also never received a packet over a network: in every test the sender runs
+  inside the same emulator on 127.0.0.1, because that was the only way to test
+  while the host's UDP port was in use. `AndroidReceiver/README.md` says the
+  same.
+- **The Wi-Fi run played no audio.** It was the Windows sender to a Mac
+  running the statistics-only Python tool. Packets crossed Wi-Fi; nothing was
+  heard, and the Android app was not part of it.
 - **No acoustic latency measurement.** The headline ~110 ms is an estimate and
-  there is no Bluetooth comparison. The tooling is written and self-tested; it
-  needs a microphone, the earbuds, and a Bluetooth headset.
+  there is no Bluetooth comparison — so the project's central claim, that this
+  beats Bluetooth, is currently unproven. The tooling is written and
+  self-tested; it needs a microphone, the earbuds, and a Bluetooth headset.
 - **Nothing has been judged by ear.** No preset, macro or imported correction
-  in this app has ever been listened to through wired earbuds. The tests prove
-  it applies what was asked for, not that the result is any good.
-  `docs/LISTENING_TEST.md` is the procedure; its boxes are empty.
+  in this app has ever been listened to through wired earbuds, and neither has
+  the stream itself on a phone. The tests prove it applies what was asked for,
+  not that the result is any good. `docs/LISTENING_TEST.md` is the procedure;
+  its boxes are empty.
 - **The file picker and export have never been run.** Every automated UI test
   pasted text instead, so `ACTION_OPEN_DOCUMENT` and `ACTION_CREATE_DOCUMENT`
   have been drawn on screen and never opened. The no-permission claim rests on
@@ -239,12 +287,15 @@ selects the old WinMM backend, which reproduces the 16.7% drain described in
 
 ## What's next
 
-1. **The acoustic measurement.** Everything else is guesswork until the number
-   includes the parts no API reports.
-2. **The listening test**, on a real phone with real earbuds.
-3. **A `STATS` control packet**, so the sender can display what the receiver
+1. **Run Luma on a physical phone, over real Wi-Fi, from the real sender.**
+   Nothing about the Android half is proven until packets cross a network into
+   hardware and audio comes out.
+2. **The listening test**, on that phone with real earbuds.
+3. **The acoustic measurement.** The headline latency stays guesswork until
+   the number includes the parts no API reports.
+4. **A `STATS` control packet**, so the sender can display what the receiver
    measures.
-4. **The Swift receiver**, when a Mac is available.
+5. **The Swift receiver**, when a Mac is available.
 
 ## Architecture
 
